@@ -146,6 +146,16 @@ describe("session.retry.delay", () => {
       expect(attempts).toStrictEqual([1, 2, 3, 4, 5])
     }),
   )
+
+  test("caps free-tier retry delay when the proxy rotator is active", () => {
+    const multiHourHeader = apiError({ "retry-after": "7200" })
+    const wait = SessionRetry.delay(1, multiHourHeader)
+    expect(SessionRetry.freeTierDelay(wait, "free_tier_limit", undefined)).toBe(wait)
+    expect(SessionRetry.freeTierDelay(wait, undefined, SessionRetry.RETRY_PROXY_RESCAN_DELAY)).toBe(wait)
+    expect(
+      SessionRetry.freeTierDelay(wait, "free_tier_limit", SessionRetry.RETRY_PROXY_RESCAN_DELAY),
+    ).toBe(SessionRetry.RETRY_PROXY_RESCAN_DELAY)
+  })
 })
 
 describe("session.retry.retryable", () => {

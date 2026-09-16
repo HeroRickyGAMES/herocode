@@ -29,6 +29,13 @@ export const RETRY_JITTER_FACTOR = 0.25
 export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
 export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
 export const RETRY_MAX_RETRIES = 5
+// When the proxy rotator is active, re-try free-tier IP limits this often so a
+// fresh egress IP gets a chance instead of honoring the server's multi-hour
+// `retry-after` (Zen resets its daily free quota at midnight UTC).
+export const RETRY_PROXY_RESCAN_DELAY = 30_000
+// While the proxy rotator keeps finding proxies to rescan, don't give up after
+// the default 5 attempts; keep cycling until a working egress IP appears.
+export const RETRY_PROXY_MAX_RETRIES = 25
 
 const RETRYABLE_MESSAGE_PATTERNS = [
   /429|500|502|503|504|524/i,
@@ -180,27 +187,46 @@ function parseJSON(value: unknown) {
   })
 }
 
+export function freeTierDelay(wait: number, reason: RetryReason | undefined, maxFreeLimitDelayMs?: number) {
+  if (reason !== "free_tier_limit" || maxFreeLimitDelayMs === undefined) return wait
+  return Math.min(wait, maxFreeLimitDelayMs)
+}
+
 export function policy(opts: {
   provider: string
   parse: (error: unknown) => Err
   set: (input: { attempt: number; message: string; action?: Retryable["action"]; next: number }) => Effect.Effect<void>
+  /**
+   * When set, caps the wait for proxy/IP-driven retries (free-tier usage
+   * limits) so the session re-attempts quickly and the proxy rotator rescans
+   * for a fresh egress IP instead of honoring a multi-hour `retry-after`.
+   */
+  maxFreeLimitDelayMs?: number
+  /** Override the default 5-retry budget. Used to keep searching for a fresh
+   * proxy while the proxy rotator is active. */
+  maxRetries?: number
 }) {
+  if (opts.maxRetries !== undefined && opts.maxRetries < 1) {
+    throw new Error("maxRetries must be >= 1")
+  }
+  const maxRetries = opts.maxRetries ?? RETRY_MAX_RETRIES
   return Schedule.fromStepWithMetadata(
     Effect.succeed((meta: Schedule.InputMetadata<unknown>) => {
       const error = opts.parse(meta.input)
       const retry = retryable(error, opts.provider)
       if (!retry) return Cause.done(meta.attempt)
-      if (meta.attempt > RETRY_MAX_RETRIES) return Cause.done(meta.attempt)
+      if (meta.attempt > maxRetries) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
         const wait = delay(meta.attempt, SessionV1.APIError.isInstance(error) ? error : undefined)
+        const capped = freeTierDelay(wait, retry.action?.reason, opts.maxFreeLimitDelayMs)
         const now = yield* Clock.currentTimeMillis
         yield* opts.set({
           attempt: meta.attempt,
           message: retry.message,
           action: retry.action,
-          next: now + wait,
+          next: now + capped,
         })
-        return [meta.attempt, Duration.millis(wait)] as [number, Duration.Duration]
+        return [meta.attempt, Duration.millis(capped)] as [number, Duration.Duration]
       })
     }),
   )

@@ -16,6 +16,7 @@ import { ConfigPluginV1 } from "./plugin"
 import { ConfigProviderV1 } from "./provider"
 import { ConfigServerV1 } from "./server"
 import { ConfigSkillsV1 } from "./skills"
+import { ConfigVisionV1 } from "./vision"
 
 export type Layout = ConfigLayoutV1.Layout
 
@@ -130,6 +131,10 @@ export const Info = Schema.Struct({
   attachment: Schema.optional(ConfigAttachmentV1.Info).annotate({
     description: "Attachment processing configuration, including image size limits and resizing behavior",
   }),
+  vision: Schema.optional(ConfigVisionV1.Info).annotate({
+    description:
+      "Vision configuration for describing images to models that cannot read them, using an OpenRouter vision model",
+  }),
   enterprise: Schema.optional(
     Schema.Struct({ url: Schema.optional(Schema.String).annotate({ description: "Enterprise URL" }) }),
   ),
@@ -186,6 +191,17 @@ export const Info = Schema.Struct({
         description: "Policy statements applied to supported resources, such as provider access",
       }),
     }),
+  ),
+  antiratelimit: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Rotate the outbound IP through public proxies when a provider rate limits the request (free-flow bypass).",
+      }),
+      providers: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+        description: "Provider IDs this behavior applies to (defaults to the 'opencode' Zen provider).",
+      }),
+    }).annotate({ identifier: "AntiRateLimit" }),
   ),
 }).annotate({ identifier: "Config" })
 

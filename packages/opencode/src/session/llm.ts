@@ -29,6 +29,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { Vision } from "@/vision/vision"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -70,6 +71,7 @@ const live: Layer.Layer<
   | EventV2Bridge.Service
   | LLMClientService
   | RuntimeFlags.Service
+  | Vision.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -398,6 +400,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     llmClient,
     RuntimeFlags.node,
+    Vision.node,
   ],
 })
 

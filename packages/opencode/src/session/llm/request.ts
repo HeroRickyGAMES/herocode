@@ -9,9 +9,21 @@ import type { MessageV2 } from "../message-v2"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "../system"
+import { Vision } from "@/vision/vision"
+import { Config } from "@/config/config"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Record } from "effect"
-import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
+import * as Option from "effect/Option"
+import {
+  jsonSchema,
+  tool as aiTool,
+  type FilePart,
+  type ImagePart,
+  type ModelMessage,
+  type TextPart,
+  type Tool,
+  type UIMessage,
+} from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 
@@ -178,9 +190,47 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     ? (yield* InstanceState.context).project.id
     : undefined
 
+  const vision = Option.getOrUndefined(yield* Effect.serviceOption(Vision.Service))
+  const visionSettings = vision ? yield* vision.settings() : undefined
+  const imageParts: Array<{ role: string; content: "content" | "parts" | "string" | "none" }> = []
+  for (const msg of input.messages) {
+    const content =
+      Array.isArray(msg.content)
+        ? msg.content
+        : (msg as ModelMessage & { parts?: readonly RequestPart[] }).parts
+    if (!content || content.length === 0) continue
+    if (content.some(isImagePart))
+      imageParts.push({
+        role: msg.role,
+        content: Array.isArray(msg.content) ? "content" : "parts",
+      })
+  }
+  if (imageParts.length > 0) {
+    const hasConfig = yield* Effect.serviceOption(Config.Service).pipe(Effect.map(Option.isSome))
+    const hasPermission = yield* Effect.serviceOption(Permission.Service).pipe(Effect.map(Option.isSome))
+    yield* Effect.logInfo("vision.prepare", {
+      hasVision: vision !== undefined,
+      hasSettings: visionSettings !== undefined,
+      force: visionSettings?.force ?? null,
+      imageCapable: input.model.capabilities.input.image,
+      config: hasConfig,
+      permission: hasPermission,
+      imageMessages: imageParts.map((part) => `${part.role}:${part.content}`).join(","),
+    })
+  }
+  const finalMessages =
+    vision && visionSettings
+      ? yield* withVisionDescriptions({
+          messages,
+          model: input.model,
+          force: visionSettings.force,
+          describe: (imageUrls, userText) => vision.describe({ imageUrls, userText }),
+        })
+      : messages
+
   return {
     system,
-    messages,
+    messages: finalMessages,
     tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
     params,
     messageTransformOptions: options,
@@ -203,6 +253,88 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       ...headers,
     },
   }
+})
+
+type ImageFilePart = FilePart | ImagePart | Extract<UIMessage["parts"][number], { type: "file" }>
+
+type RequestPart = TextPart | ImagePart | FilePart | UIMessage["parts"][number]
+
+const isImagePart = (part: unknown): part is ImageFilePart => {
+  if (part === null || typeof part !== "object") return false
+  const candidate = part as { type?: unknown; mediaType?: unknown }
+  return (
+    candidate.type === "image" ||
+    (candidate.type === "file" && typeof candidate.mediaType === "string" && candidate.mediaType.startsWith("image/"))
+  )
+}
+
+const toDataUrl = (part: ImageFilePart) => {
+  const mime = part.type === "image" ? undefined : part.mediaType
+  const data =
+    part.type === "image"
+      ? part.image
+      : "data" in part && part.data !== undefined
+        ? part.data
+        : "url" in part
+          ? part.url
+          : undefined
+  if (data instanceof URL) return data.toString()
+  if (typeof data === "string") {
+    if (data.startsWith("data:") || data.startsWith("http://") || data.startsWith("https://")) return data
+    return `data:${mime ?? "image/png"};base64,${data}`
+  }
+  if (data === undefined) return `data:${mime ?? "image/png"};base64,`
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
+  return `data:${mime ?? "image/png"};base64,${Buffer.from(bytes).toString("base64")}`
+}
+
+const isTextPart = (part: RequestPart | undefined): part is TextPart =>
+  !!part && part.type === "text" && typeof part.text === "string"
+
+const withVisionDescriptions = Effect.fn("LLMRequestPrep.withVisionDescriptions")(function* (input: {
+  messages: ModelMessage[]
+  model: Provider.Model
+  force: boolean
+  describe: (imageUrls: readonly string[], userText: string) => Effect.Effect<string, Vision.Error>
+}) {
+  if (!input.force && input.model.capabilities.input.image) return input.messages
+
+  const describeMessage = Effect.fn("LLMRequestPrep.describeMessage")(function* (msg: ModelMessage) {
+    if (msg.role !== "user") return msg
+    const content =
+      msg.content !== undefined && Array.isArray(msg.content)
+        ? msg.content
+        : (msg as ModelMessage & { parts?: readonly RequestPart[] }).parts
+    if (!content || content.length === 0) return msg
+    const userText = content
+      .filter(isTextPart)
+      .map((part) => part.text)
+      .join(" ")
+      .slice(0, 2000)
+    let imageIndex = 0
+    const next: RequestPart[] = []
+    for (const part of content) {
+      if (!isImagePart(part)) {
+        next.push(part)
+        continue
+      }
+      imageIndex += 1
+      const description = yield* input
+        .describe([toDataUrl(part)], userText)
+        .pipe(Effect.orElseSucceed(() => "não foi possível descrever a imagem"))
+      next.push({ type: "text", text: `[Imagem #${imageIndex}: ${description}]` })
+    }
+    const isUIMessage = msg.content === undefined && "parts" in msg
+    yield* Effect.logInfo("vision.describe-message", {
+      role: msg.role,
+      shape: isUIMessage ? "parts" : "content",
+      partTypes: content.map((part) => part.type).join(","),
+      images: imageIndex,
+    })
+    return isUIMessage ? ({ ...msg, parts: next } as ModelMessage) : ({ ...msg, content: next } as ModelMessage)
+  })
+
+  return yield* Effect.forEach(input.messages, (msg) => describeMessage(msg))
 })
 
 function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission" | "user">) {

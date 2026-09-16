@@ -644,7 +644,16 @@ const layer = Layer.effect(
           messageID: input.assistantMessage.id,
         })
         ctx.needsCompaction = false
-        ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        const cfg = yield* config.get()
+        ctx.shouldBreak = cfg.experimental?.continue_loop_on_deny !== true
+
+        // Mirrors Provider.Provider's rotator gate (provider.ts). When this
+        // provider rotates proxies, a free-tier IP limit should re-try quickly
+        // (and rescan for a fresh proxy) instead of honoring a multi-hour
+        // `retry-after` from the server.
+        const anti = cfg.antiratelimit
+        const antiProviders = anti?.providers && anti.providers.length > 0 ? anti.providers : ["opencode"]
+        const rotatorActive = anti?.enabled !== false && antiProviders.includes(input.model.providerID)
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
@@ -684,6 +693,8 @@ const layer = Layer.effect(
                     next: info.next,
                   })
                 },
+                maxFreeLimitDelayMs: rotatorActive ? SessionRetry.RETRY_PROXY_RESCAN_DELAY : undefined,
+                maxRetries: rotatorActive ? SessionRetry.RETRY_PROXY_MAX_RETRIES : undefined,
               }),
             ),
             Effect.catch(halt),

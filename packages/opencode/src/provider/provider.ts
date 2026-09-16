@@ -31,8 +31,27 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
+import { ProxyRotator, type ProxyStatus } from "./proxy-rotator"
+import { TuiEvent } from "@/server/tui-event"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { attach } from "@/effect/run-service"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
+
+// Rotators are shared per provider id so rotation state (active proxy, used
+// list, disk cache) persists across sessions for the lifetime of the process.
+const rotators = new Map<string, ProxyRotator>()
+
+function getRotator(id: string, target: string, onStatus: (status: ProxyStatus) => void) {
+  const existing = rotators.get(id)
+  if (existing) {
+    existing.setStatus(onStatus)
+    return existing
+  }
+  const rotator = new ProxyRotator({ id, target, onStatus })
+  rotators.set(id, rotator)
+  return rotator
+}
 
 function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (typeof ms !== "number" || ms <= 0) return res
@@ -1396,6 +1415,27 @@ const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const modelsDevSvc = yield* ModelsDev.Service
     const runtimeFlags = yield* RuntimeFlags.Service
+    const events = yield* EventV2Bridge.Service
+
+    const showProxyToast = (status: ProxyStatus) => {
+      const payload =
+        status.kind === "switch"
+          ? { title: "Switching proxy", message: `Using ${status.proxy}`, variant: "info" as const }
+          : status.kind === "rescan"
+            ? { title: "Switching proxy", message: "Searching for a fresh proxy…", variant: "info" as const }
+            : status.kind === "discard"
+              ? {
+                  title: "Switching proxy",
+                  message: `Dropping ${status.proxy}: ${status.reason}`,
+                  variant: "warning" as const,
+                }
+              : undefined
+      if (!payload) return
+      // `attach` re-binds the current fiber's instance/workspace refs so the
+      // toast event reaches the TUI attached to this workspace; a bare
+      // `Effect.runPromise` loses that context and the TUI drops the event.
+      Effect.runPromise(attach(events.publish(TuiEvent.ToastShow, { ...payload, duration: 4000 }))).catch(() => {})
+    }
 
     const state = yield* InstanceState.make<State>(() =>
       Effect.gen(function* () {
@@ -1731,7 +1771,12 @@ const layer = Layer.effect(
 
     const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.providers))
 
-    async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>) {
+    async function resolveSDK(
+      model: Model,
+      s: State,
+      envs: Record<string, string | undefined>,
+      onStatus?: (status: ProxyStatus) => void,
+    ) {
       try {
         const provider = s.providers[model.providerID]
         const options = { ...provider.options }
@@ -1801,6 +1846,12 @@ const layer = Layer.effect(
         delete options["chunkTimeout"]
         delete options["headerTimeout"]
 
+        let rotator: ProxyRotator | undefined
+        if (onStatus && baseURL !== undefined) {
+          const targetHost = new URL(baseURL).origin
+          rotator = getRotator(model.providerID, targetHost, onStatus)
+        }
+
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
           const fetchFn = customFetch ?? fetch
           const opts = init ?? {}
@@ -1818,14 +1869,49 @@ const layer = Layer.effect(
           const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
           if (combined) opts.signal = combined
 
-          const res = await fetchFn(input, {
-            ...opts,
-            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-            timeout: false,
-          }).finally(() => headerTimeoutCtl?.clear())
+          if (!rotator) {
+            const res = await fetchFn(input, {
+              ...opts,
+              // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+              timeout: false,
+            }).finally(() => headerTimeoutCtl?.clear())
+            if (!chunkAbortCtl) return res
+            return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+          }
 
-          if (!chunkAbortCtl) return res
-          return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+          try {
+            const perform = async (proxy: string | undefined, rotatorSignal?: AbortSignal) => {
+              const rotatorCombined = rotatorSignal
+                ? opts.signal
+                  ? AbortSignal.any([opts.signal, rotatorSignal])
+                  : rotatorSignal
+                : opts.signal
+
+              const res = await fetchFn(
+                input,
+                proxy
+                  ? {
+                      ...opts,
+                      // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+                      timeout: false,
+                      proxy,
+                      signal: rotatorCombined,
+                    }
+                  : {
+                      ...opts,
+                      // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+                      timeout: false,
+                      signal: rotatorCombined,
+                    },
+              )
+              return { status: res.status, response: res }
+            }
+            const { response: res } = await rotator.withRetry(perform)
+            if (!chunkAbortCtl) return res
+            return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+          } finally {
+            headerTimeoutCtl?.clear()
+          }
         }
 
         const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
@@ -1900,9 +1986,14 @@ const layer = Layer.effect(
       if (s.models.has(key)) return s.models.get(key)!
 
       const provider = s.providers[model.providerID]
+      const cfg = yield* config.get()
+      const anti = cfg.antiratelimit
+      const antiEnabled = anti?.enabled !== false
+      const antiProviders = anti?.providers && anti.providers.length > 0 ? anti.providers : ["opencode"]
+      const useRotator = antiEnabled && antiProviders.includes(model.providerID)
       return yield* EffectPromise.refineRejection(
         async () => {
-          const sdk = await resolveSDK(model, s, envs)
+          const sdk = await resolveSDK(model, s, envs, useRotator ? showProxyToast : undefined)
           const language = s.modelLoaders[model.providerID]
             ? await s.modelLoaders[model.providerID](
                 sdk,
@@ -2066,7 +2157,16 @@ export function parseModel(model: string) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, Config.node, Auth.node, Env.node, Plugin.node, ModelsDev.node, RuntimeFlags.node],
+  deps: [
+    FSUtil.node,
+    Config.node,
+    Auth.node,
+    Env.node,
+    Plugin.node,
+    ModelsDev.node,
+    RuntimeFlags.node,
+    EventV2Bridge.node,
+  ],
 })
 
 export * as Provider from "./provider"
