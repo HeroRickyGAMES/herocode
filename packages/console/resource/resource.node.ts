@@ -29,13 +29,15 @@ export const Resource = new Proxy(
           const accountId = secrets.CLOUDFLARE_DEFAULT_ACCOUNT_ID.value
           return {
             get: (k: string | string[]) => {
-              const isMulti = Array.isArray(k)
               return client.kv.namespaces
                 .bulkGet(namespaceId, {
                   keys: Array.isArray(k) ? k : [k],
                   account_id: accountId,
                 })
-                .then((result) => (isMulti ? new Map(Object.entries(result?.values ?? {})) : result?.values?.[k]))
+                .then((result: { values?: Record<string, string> } | null) => {
+                  if (Array.isArray(k)) return new Map(Object.entries(result?.values ?? {}))
+                  return result?.values?.[k]
+                })
             },
             put: (k: string, v: string, opts?: KVNamespacePutOptions) =>
               client.kv.namespaces.values.update(namespaceId, k, {
@@ -55,7 +57,7 @@ export const Resource = new Proxy(
                   account_id: accountId,
                   prefix: opts?.prefix ?? undefined,
                 })
-                .then((result) => {
+                .then((result: { result: KVNamespaceListResult<unknown, string>["keys"] }) => {
                   return {
                     keys: result.result,
                     list_complete: true,
