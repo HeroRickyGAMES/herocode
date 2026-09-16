@@ -43,6 +43,15 @@
 
 ---
 
+### What's new in this build
+
+- **Background terminal** — long-running shell commands run in the background, so the agent stays responsive. You get notified when they finish, and live output is streamed while they run.
+- **Live Shell panel** — the TUI shows the current output of running background commands in a panel above the prompt. Click a command to focus it and scroll with ↑/↓.
+- **Edit last message** — press `↑` in the prompt to reload the last message you sent in the current session and edit it.
+- **Read responses aloud** — click `♪` on a finished response to hear it spoken in its detected language (uses `say`, `espeak-ng`/`espeak`, or the Windows PowerShell speech synthesizer). Click again to stop.
+
+---
+
 ### Installation
 
 ```bash
