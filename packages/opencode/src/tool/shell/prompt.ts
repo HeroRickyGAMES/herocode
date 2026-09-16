@@ -16,6 +16,10 @@ export function parameterSchema() {
   return Schema.Struct({
     command: Schema.String.annotate({ description: "The command to execute" }),
     timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
+    background: Schema.optional(Schema.Boolean).annotate({
+      description:
+        "Run the command in the background and return immediately. You will be notified automatically when it finishes. Use only for long-running or non-blocking work whose output you do not need before continuing.",
+    }),
     workdir: Schema.optional(Schema.String).annotate({
       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
     }),

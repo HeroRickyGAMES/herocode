@@ -21115,6 +21115,49 @@
         },
         "additionalProperties": false
       },
+      "VisionConfig": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "api_key": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "fallbacks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "force": {
+            "type": "boolean"
+          },
+          "timeout": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AntiRateLimit": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "providers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "Config": {
         "type": "object",
         "properties": {
@@ -21481,6 +21524,9 @@
           "attachment": {
             "$ref": "#/components/schemas/AttachmentConfig"
           },
+          "vision": {
+            "$ref": "#/components/schemas/VisionConfig"
+          },
           "enterprise": {
             "type": "object",
             "properties": {
@@ -21561,6 +21607,9 @@
               }
             },
             "additionalProperties": false
+          },
+          "antiratelimit": {
+            "$ref": "#/components/schemas/AntiRateLimit"
           }
         },
         "additionalProperties": false

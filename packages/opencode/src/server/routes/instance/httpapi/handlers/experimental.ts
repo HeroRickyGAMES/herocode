@@ -171,6 +171,18 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
       return promoted.some((job) => job !== undefined)
     })
 
+    const job = Effect.fn("ExperimentalHttpApi.job")(function* (ctx: { params: { jobID: string } }) {
+      const info = yield* background.get(ctx.params.jobID)
+      if (!info) return yield* Effect.fail(new HttpApiError.NotFound({}))
+      return info
+    })
+
+    const jobs = Effect.fn("ExperimentalHttpApi.jobs")(function* (ctx: { query: { sessionID: SessionID } }) {
+      return (yield* background.list()).filter(
+        (job) => job.type === "shell" && job.metadata?.sessionId === ctx.query.sessionID,
+      )
+    })
+
     const resource = Effect.fn("ExperimentalHttpApi.resource")(function* () {
       return yield* mcp.resources()
     })
@@ -188,6 +200,8 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
       .handle("worktreeReset", worktreeReset)
       .handle("session", session)
       .handle("sessionBackground", sessionBackground)
+      .handle("job", job)
+      .handle("jobs", jobs)
       .handle("resource", resource)
   }),
 )

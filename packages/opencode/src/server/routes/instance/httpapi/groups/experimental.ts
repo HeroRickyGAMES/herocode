@@ -87,6 +87,32 @@ export const SessionListQuery = Schema.Struct({
   archived: Schema.optional(QueryBoolean),
 })
 
+export const JobID = Schema.String
+
+const JobStatus = Schema.Union([
+  Schema.Literal("running"),
+  Schema.Literal("completed"),
+  Schema.Literal("error"),
+  Schema.Literal("cancelled"),
+])
+
+export const JobInfo = Schema.Struct({
+  id: JobID,
+  type: Schema.String,
+  title: Schema.optional(Schema.String),
+  status: JobStatus,
+  started_at: Schema.Number,
+  completed_at: Schema.optional(Schema.Number),
+  output: Schema.optional(Schema.String),
+  error: Schema.optional(Schema.String),
+  metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+}).annotate({ identifier: "JobInfo" })
+
+export const JobListQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  sessionID: SessionID,
+})
+
 export const ExperimentalPaths = {
   capabilities: "/experimental/capabilities",
   console: "/experimental/console",
@@ -98,6 +124,8 @@ export const ExperimentalPaths = {
   worktreeReset: "/experimental/worktree/reset",
   session: "/experimental/session",
   sessionBackground: "/experimental/session/:sessionID/background",
+  job: "/experimental/job/:jobID",
+  jobs: "/experimental/jobs",
   resource: "/experimental/resource",
 } as const
 
@@ -243,6 +271,29 @@ export const ExperimentalApi = HttpApi.make("experimental")
             summary: "Background subagents",
             description:
               "Detach any synchronous subagents currently blocking the session and continue them in the background.",
+          }),
+        ),
+        HttpApiEndpoint.get("job", ExperimentalPaths.job, {
+          params: { jobID: JobID },
+          query: WorkspaceRoutingQuery,
+          success: described(JobInfo, "Background job"),
+          error: HttpApiError.NotFound,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "experimental.job.get",
+            summary: "Get background job",
+            description:
+              "Get the current status, stdout tail, and metadata of a background job, including the live output streamed by background shell jobs.",
+          }),
+        ),
+        HttpApiEndpoint.get("jobs", ExperimentalPaths.jobs, {
+          query: JobListQuery,
+          success: described(Schema.Array(JobInfo), "Background shell jobs"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "experimental.job.list",
+            summary: "List background shell jobs",
+            description: "List the background shell jobs attached to a session, including their live output tails.",
           }),
         ),
         HttpApiEndpoint.get("resource", ExperimentalPaths.resource, {

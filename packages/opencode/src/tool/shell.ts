@@ -12,8 +12,12 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { fileURLToPath } from "url"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Identifier } from "@/id/id"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
+import { BackgroundJob } from "@/background/job"
+import { Scope } from "effect"
+import type { TaskPromptOps } from "./task"
 
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -254,6 +258,33 @@ function tail(text: string, maxLines: number, maxBytes: number) {
   }
 }
 
+type BashResult = {
+  output: string
+  exit: number | null
+  truncated: boolean
+  outputPath?: string
+  background?: boolean
+  command?: string
+  jobId?: string
+}
+
+function renderBashResult(input: {
+  id: string
+  command: string
+  exit: number | null
+  error: boolean
+  text: string
+}) {
+  const tag = input.error ? "bash_error" : "bash_result"
+  return [
+    `<bash id="${input.id}" state="${input.error ? "error" : "completed"}" exit="${input.exit ?? ""}">`,
+    `<${tag}>`,
+    input.text,
+    `</${tag}>`,
+    "</bash>",
+  ].join("\n")
+}
+
 const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
   const tree = yield* Effect.promise(() => parser().then((p) => (ps ? p.ps : p.bash).parse(command)))
   if (!tree) throw new Error("Failed to parse command")
@@ -344,6 +375,8 @@ export const ShellTool = Tool.define(
     const trunc = yield* Truncate.Service
     const plugin = yield* Plugin.Service
     const flags = yield* RuntimeFlags.Service
+    const background = yield* BackgroundJob.Service
+    const scope = yield* Scope.Scope
     const defaultTimeoutMs = flags.bashDefaultTimeoutMs ?? 2 * 60 * 1000
 
     const cygpath = Effect.fn("ShellTool.cygpath")(function* (shell: string, text: string) {
@@ -422,6 +455,246 @@ export const ShellTool = Tool.define(
       return {
         ...process.env,
         ...extra.env,
+      }
+    })
+
+    const streamBackground = Effect.fn("ShellTool.streamBackground")(function* (
+      input: {
+        id: string
+        shell: string
+        command: string
+        cwd: string
+        env: NodeJS.ProcessEnv
+        timeout?: number
+      },
+    ) {
+      const limits = yield* trunc.limits()
+      const keep = limits.maxBytes * 2
+      let full = ""
+      let last = ""
+      let file = ""
+      let sink: ReturnType<typeof createWriteStream> | undefined
+      let cut = false
+      const list: Chunk[] = []
+      let used = 0
+
+      const closeSink = Effect.fnUntraced(function* () {
+        const stream = sink
+        if (!stream) return
+        sink = undefined
+        if (stream.destroyed || stream.closed) return
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              let settled = false
+              const done = () => {
+                if (settled) return
+                settled = true
+                stream.off("close", done)
+                stream.off("error", done)
+                stream.off("finish", done)
+                resolve()
+              }
+              stream.once("close", done)
+              stream.once("error", done)
+              stream.once("finish", done)
+              stream.end(done)
+            }),
+        ).pipe(Effect.catch(() => Effect.void))
+      })
+
+      const patch = Effect.fnUntraced(function* () {
+        return background.progress({
+          id: input.id,
+          output: last,
+        })
+      })
+
+      const progress = Effect.fnUntraced(function* (chunk: string) {
+        const size = Buffer.byteLength(chunk, "utf-8")
+        list.push({ text: chunk, size })
+        used += size
+        while (used > keep && list.length > 1) {
+          const item = list.shift()
+          if (!item) break
+          used -= item.size
+          cut = true
+        }
+        last = preview(last + chunk)
+
+        if (file) {
+          sink?.write(chunk)
+          return patch()
+        }
+        full += chunk
+        if (Buffer.byteLength(full, "utf-8") <= limits.maxBytes) return patch()
+        const next = yield* trunc.write(full)
+        file = next
+        cut = true
+        sink = createWriteStream(next, { flags: "a" })
+        full = ""
+        return patch()
+      })
+
+      let code: number | null = null
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* Effect.addFinalizer(closeSink)
+          const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
+          yield* Effect.forkScoped(
+            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => progress(chunk)),
+          )
+          if (input.timeout === undefined) {
+            code = yield* handle.exitCode
+          } else {
+            const timeout = Effect.sleep(`${input.timeout + 100} millis`)
+            const exit = yield* Effect.raceAll([
+              handle.exitCode.pipe(Effect.map((exit) => ({ kind: "exit" as const, code: exit }))),
+              timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
+            ])
+            if (exit.kind === "timeout") {
+              yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
+              code = null
+            } else {
+              code = exit.code
+            }
+          }
+        }),
+      ).pipe(Effect.orDie)
+
+      const meta: string[] = []
+      if (input.timeout !== undefined) {
+        meta.push(
+          `shell tool terminated background command after exceeding timeout ${input.timeout} ms. If this command is expected to take longer, retry with a larger timeout value in milliseconds or omit timeout to let it run until it finishes.`,
+        )
+      }
+      const raw = list.map((item) => item.text).join("")
+      const end = tail(raw, limits.maxLines, limits.maxBytes)
+      if (end.cut) cut = true
+      if (!file && end.cut) {
+        file = yield* trunc.write(raw)
+      }
+
+      let output = end.text
+      if (!output) output = "(no output)"
+
+      if (cut && file) {
+        output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
+      }
+
+      if (meta.length > 0) {
+        output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
+      }
+
+      yield* background.progress({
+        id: input.id,
+        output: last || preview(output),
+        metadata: { exit: code },
+      })
+      return output
+    })
+
+    const injectBashResult = Effect.fn("ShellTool.injectBashResult")(function* (
+      ctx: Tool.Context,
+      ops: TaskPromptOps,
+      state: "completed" | "error",
+      input: { id: string; command: string; exit: number | null; text: string },
+    ) {
+      yield* ops
+        .prompt({
+          sessionID: ctx.sessionID,
+          agent: ctx.agent,
+          parts: [
+            {
+              type: "text",
+              synthetic: true,
+              text: renderBashResult({
+                ...input,
+                error: state === "error",
+              }),
+            },
+          ],
+        })
+        .pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
+    })
+
+    const notifyBackgroundResult = Effect.fn("ShellTool.notifyBackgroundResult")(function* (
+      id: string,
+      command: string,
+      ctx: Tool.Context,
+    ) {
+      const ops = ctx.extra?.promptOps as TaskPromptOps | undefined
+      if (!ops) return
+      yield* background.wait({ id }).pipe(
+        Effect.flatMap((result) => {
+          const info = result.info
+          if (!info) return Effect.void
+          if (info.status === "completed") {
+            return injectBashResult(ctx, ops, "completed", {
+              id,
+              command,
+              exit: typeof info.metadata?.exit === "number" ? info.metadata.exit : null,
+              text: info.output ?? "",
+            })
+          }
+          if (info.status === "error") {
+            return injectBashResult(ctx, ops, "error", {
+              id,
+              command,
+              exit: null,
+              text: info.error ?? "background command failed",
+            })
+          }
+          return Effect.void
+        }),
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+    })
+
+    const backgroundShell = Effect.fn("ShellTool.backgroundShell")(function* (
+      input: {
+        shell: string
+        command: string
+        cwd: string
+        env: NodeJS.ProcessEnv
+        timeout?: number
+      },
+      ctx: Tool.Context,
+    ) {
+      const id = Identifier.ascending("job")
+      const info = yield* background.start({
+        id,
+        type: ShellID.ToolID,
+        title: input.command,
+        metadata: {
+          background: true,
+          command: input.command,
+          cwd: input.cwd,
+          sessionId: ctx.sessionID,
+        },
+        run: streamBackground({ ...input, id }).pipe(
+          Effect.provideService(BackgroundJob.Service, background),
+          Effect.provideService(Truncate.Service, trunc),
+          Effect.provideService(ChildProcessSpawner, spawner),
+        ),
+      })
+
+      const jobId = info.id
+      yield* notifyBackgroundResult(jobId, input.command, ctx)
+
+      const text = `Started the command in the background (job ${jobId}). The live output is attached to this session and you will be notified automatically when it finishes. DO NOT sleep, poll, or wait for it.`
+
+      return {
+        title: input.command,
+        metadata: {
+          background: true,
+          command: input.command,
+          jobId,
+          output: text,
+          exit: null,
+          truncated: false,
+        } as BashResult,
+        output: text,
       }
     })
 
@@ -589,7 +862,7 @@ export const ShellTool = Tool.define(
           exit: code,
           truncated: cut,
           ...(cut && file ? { outputPath: file } : {}),
-        },
+        } as BashResult,
         output,
       }
     })
@@ -628,12 +901,27 @@ export const ShellTool = Tool.define(
                 }),
               )
 
+              const env = yield* shellEnv(ctx, cwd)
+
+              if (params.background === true) {
+                return yield* backgroundShell(
+                  {
+                    shell,
+                    command: params.command,
+                    cwd,
+                    env,
+                    ...(params.timeout !== undefined ? { timeout } : {}),
+                  },
+                  ctx,
+                )
+              }
+
               return yield* run(
                 {
                   shell,
                   command: params.command,
                   cwd,
-                  env: yield* shellEnv(ctx, cwd),
+                  env,
                   timeout,
                 },
                 ctx,

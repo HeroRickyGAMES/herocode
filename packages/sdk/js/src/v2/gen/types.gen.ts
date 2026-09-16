@@ -1886,6 +1886,20 @@ export type AttachmentConfig = {
   image?: ImageAttachmentConfig
 }
 
+export type VisionConfig = {
+  enabled?: boolean
+  api_key?: string
+  model?: string
+  fallbacks?: Array<string>
+  force?: boolean
+  timeout?: number
+}
+
+export type AntiRateLimit = {
+  enabled?: boolean
+  providers?: Array<string>
+}
+
 export type Config = {
   $schema?: string
   shell?: string
@@ -2007,6 +2021,7 @@ export type Config = {
     [key: string]: boolean
   }
   attachment?: AttachmentConfig
+  vision?: VisionConfig
   enterprise?: {
     url?: string
   }
@@ -2030,6 +2045,7 @@ export type Config = {
     mcp_timeout?: number
     policies?: Array<ConfigV2ExperimentalPolicy>
   }
+  antiratelimit?: AntiRateLimit
 }
 
 export type Model = {
@@ -2247,6 +2263,20 @@ export type GlobalSession = {
     diff?: string
   }
   project: ProjectSummary | null
+}
+
+export type JobInfo = {
+  id: string
+  type: string
+  title?: string
+  status: "running" | "completed" | "error" | "cancelled"
+  started_at: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  completed_at?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  output?: string
+  error?: string
+  metadata?: {
+    [key: string]: unknown
+  }
 }
 
 export type McpResource = {
@@ -7860,6 +7890,69 @@ export type ExperimentalSessionBackgroundResponses = {
 
 export type ExperimentalSessionBackgroundResponse =
   ExperimentalSessionBackgroundResponses[keyof ExperimentalSessionBackgroundResponses]
+
+export type ExperimentalJobGetData = {
+  body?: never
+  path: {
+    jobID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/experimental/job/{jobID}"
+}
+
+export type ExperimentalJobGetErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type ExperimentalJobGetError = ExperimentalJobGetErrors[keyof ExperimentalJobGetErrors]
+
+export type ExperimentalJobGetResponses = {
+  /**
+   * Background job
+   */
+  200: JobInfo
+}
+
+export type ExperimentalJobGetResponse = ExperimentalJobGetResponses[keyof ExperimentalJobGetResponses]
+
+export type ExperimentalJobListData = {
+  body?: never
+  path?: never
+  query: {
+    directory?: string
+    workspace?: string
+    sessionID: string
+  }
+  url: "/experimental/jobs"
+}
+
+export type ExperimentalJobListErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ExperimentalJobListError = ExperimentalJobListErrors[keyof ExperimentalJobListErrors]
+
+export type ExperimentalJobListResponses = {
+  /**
+   * Background shell jobs
+   */
+  200: Array<JobInfo>
+}
+
+export type ExperimentalJobListResponse = ExperimentalJobListResponses[keyof ExperimentalJobListResponses]
 
 export type ExperimentalResourceListData = {
   body?: never

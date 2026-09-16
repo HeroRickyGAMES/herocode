@@ -38,6 +38,10 @@ import type {
   ExperimentalConsoleSwitchOrgResponses,
   ExperimentalControlPlaneMoveSessionErrors,
   ExperimentalControlPlaneMoveSessionResponses,
+  ExperimentalJobGetErrors,
+  ExperimentalJobGetResponses,
+  ExperimentalJobListErrors,
+  ExperimentalJobListResponses,
   ExperimentalProjectCopyGenerateNameErrors,
   ExperimentalProjectCopyGenerateNameResponses,
   ExperimentalResourceListErrors,
@@ -886,6 +890,72 @@ export class Session extends HeyApiClient {
   }
 }
 
+export class Job extends HeyApiClient {
+  /**
+   * Get background job
+   *
+   * Get the current status, stdout tail, and metadata of a background job, including the live output streamed by background shell jobs.
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters: {
+      jobID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "jobID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ExperimentalJobGetResponses, ExperimentalJobGetErrors, ThrowOnError>({
+      url: "/experimental/job/{jobID}",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * List background shell jobs
+   *
+   * List the background shell jobs attached to a session, including their live output tails.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters: {
+      directory?: string
+      workspace?: string
+      sessionID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "sessionID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ExperimentalJobListResponses, ExperimentalJobListErrors, ThrowOnError>({
+      url: "/experimental/jobs",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Resource extends HeyApiClient {
   /**
    * Get MCP resources
@@ -1259,6 +1329,11 @@ export class Experimental extends HeyApiClient {
   private _session?: Session
   get session(): Session {
     return (this._session ??= new Session({ client: this.client }))
+  }
+
+  private _job?: Job
+  get job(): Job {
+    return (this._job ??= new Job({ client: this.client }))
   }
 
   private _resource?: Resource
