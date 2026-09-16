@@ -261,6 +261,33 @@ export function Prompt(props: PromptProps) {
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
+  // Up arrow reloads the last user message of the current session transcript so
+  // it can be edited and re-submitted (Claude Code style). Rebuilds the same
+  // text + file parts the message was sent with, mirroring `session.undo`.
+  function restoreLastUserMessage() {
+    if (!props.sessionID) return false
+    const message = lastUserMessage()
+    if (!message) return false
+    const parts = sync.data.part[message.id]
+    if (!parts) return false
+    const fileParts: PromptInfo["parts"] = []
+    let inputText = ""
+    for (const part of parts) {
+      if (part.type === "text") {
+        if (!part.synthetic) inputText += part.text
+      } else if (part.type === "file") {
+        fileParts.push(part)
+      }
+    }
+    if (!inputText && fileParts.length === 0) return false
+    if (input.plainText === inputText && fileParts.length === 0) return false
+    input.setText(inputText)
+    setStore("prompt", { input: inputText, parts: fileParts })
+    restoreExtmarksFromParts(fileParts)
+    input.cursorOffset = inputText.length
+    return true
+  }
+
   const usage = createMemo(() => {
     if (!props.sessionID) return
     const session = sync.session.get(props.sessionID)
@@ -876,6 +903,10 @@ export function Prompt(props: PromptProps) {
               if (input.scrollY + input.visualCursor.visualRow === 0) input.cursorOffset = 0
               return false
             }
+
+            // Reload the last user message of the current session before falling
+            // back to the global prompt history.
+            if (restoreLastUserMessage()) return true
 
             const item = history.move(-1, input.plainText)
             if (!item) return false
@@ -1569,6 +1600,10 @@ export function Prompt(props: PromptProps) {
                         if (!r) return ""
                         const baseMessage = message()
                         const truncatedHint = isTruncated() ? " (click to expand)" : ""
+                        // Proxy rescans happen every ~30s and are expected to keep
+                        // hunting for a fresh egress IP; don't clutter the user with
+                        // countdown timing for these.
+                        if (r.action?.reason === "free_tier_limit") return `${baseMessage} (procurando outro proxy...)${truncatedHint}`
                         const duration = formatDuration(seconds())
                         const retryInfo = ` [retrying ${duration ? `in ${duration} ` : ""}attempt #${r.attempt}]`
                         return baseMessage + truncatedHint + retryInfo
