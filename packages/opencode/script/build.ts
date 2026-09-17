@@ -17,6 +17,7 @@ import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 
 const singleFlag = process.argv.includes("--single")
+const windowsFlag = process.argv.includes("--windows")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
@@ -132,7 +133,9 @@ const targets = singleFlag
 
       return true
     })
-  : allTargets
+  : windowsFlag
+    ? allTargets.filter((item) => item.os === "win32" && item.avx2 !== false && item.abi === undefined)
+    : allTargets
 
 await $`rm -rf dist`
 
