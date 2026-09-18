@@ -29,6 +29,29 @@ import { DbCommand } from "./cli/cmd/db"
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
+import { appendFileSync } from "node:fs"
+import { inspect } from "node:util"
+
+const crashLogTarget = process.env.OPENCODE_CRASH_LOG
+
+function logCrash(event: string, error: unknown) {
+  if (!crashLogTarget) return
+  try {
+    const detail = typeof error === "string" ? error : inspect(error, { depth: 6, customInspect: false })
+    appendFileSync(crashLogTarget, `[${new Date().toISOString()} pid=${process.pid} ${event}]${EOL}${detail}${EOL}`, {
+      mode: 0o600,
+    })
+  } catch {}
+}
+
+if (crashLogTarget) {
+  process.on("uncaughtExceptionMonitor", (error) => logCrash("uncaughtException", error))
+  process.on("unhandledRejection", (error) => {
+    logCrash("unhandledRejection", error)
+    process.exit(1)
+  })
+  process.on("exit", (code) => logCrash("exit", `code=${code}`))
+}
 
 const args = hideBin(process.argv)
 
@@ -126,6 +149,7 @@ try {
     await cli.parse()
   }
 } catch (e) {
+  logCrash("cli", e)
   const formatted = FormatError(e)
   if (formatted) UI.error(formatted)
   if (formatted === undefined) {
