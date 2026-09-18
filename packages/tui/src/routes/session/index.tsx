@@ -1559,34 +1559,36 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
       <Switch>
         <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
           <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3}>
-            <text marginTop={1}>
-              <span
-                style={{
-                  fg:
-                    props.message.error?.name === "MessageAbortedError"
-                      ? theme.textMuted
-                      : local.agent.color(props.message.agent),
-                }}
-              >
-                ▣{" "}
-              </span>{" "}
-              <span style={{ fg: theme.text }}>{Locale.titlecase(props.message.mode)}</span>
-              <span style={{ fg: theme.textMuted }}> · {model()}</span>
-              <Show when={duration()}>
-                <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
-              </Show>
-              <Show when={props.message.error?.name === "MessageAbortedError"}>
-                <span style={{ fg: theme.textMuted }}> · interrupted</span>
-              </Show>
+            <box flexDirection="row" marginTop={1}>
+              <text>
+                <span
+                  style={{
+                    fg:
+                      props.message.error?.name === "MessageAbortedError"
+                        ? theme.textMuted
+                        : local.agent.color(props.message.agent),
+                  }}
+                >
+                  ▣{" "}
+                </span>{" "}
+                <span style={{ fg: theme.text }}>{Locale.titlecase(props.message.mode)}</span>
+                <span style={{ fg: theme.textMuted }}> · {model()}</span>
+                <Show when={duration()}>
+                  <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
+                </Show>
+                <Show when={props.message.error?.name === "MessageAbortedError"}>
+                  <span style={{ fg: theme.textMuted }}> · interrupted</span>
+                </Show>
+                <Show when={final() && text()}>
+                  <span style={{ fg: theme.textMuted }}> · </span>
+                </Show>
+              </text>
               <Show when={final() && text()}>
-                <span style={{ fg: theme.textMuted }}> · </span>
-                <box onMouseUp={() => toggleSpeak(text())}>
-                  <text fg={speaking() ? theme.primary : theme.textMuted}>
-                    {speaking() ? "■" : "♪"}
-                  </text>
-                </box>
+                <text fg={speaking() ? theme.primary : theme.textMuted} onMouseUp={() => toggleSpeak(text())}>
+                  {speaking() ? "■" : "♪"}
+                </text>
               </Show>
-            </text>
+            </box>
           </box>
         </Match>
       </Switch>
