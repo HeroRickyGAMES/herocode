@@ -97,6 +97,36 @@ OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bas
 XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
 ```
 
+### Voz e leitura em voz alta
+
+O botão de microfone aparece ao lado do prompt na tela inicial e nas sessões ativas, e também pode ser alternado com `Ctrl+Alt+V`. O primeiro clique grava, o segundo interrompe e envia a transcrição, a resposta concluída é falada e o próximo clique retoma a escuta. `OPENCODE_MIC_DEVICE` seleciona outro dispositivo de entrada do `ffmpeg`.
+
+O padrão de transcrição é local e não envia áudio para nenhum serviço:
+
+```bash
+sudo apt install ffmpeg
+export OPENCODE_STTS_COMMAND='["python3","/caminho/stt.py","{file}"]'
+# stt.py recebe o WAV e imprime {"text":"...","language":"pt-BR"}
+```
+
+Também é possível usar `whisper.cpp` quando `whisper-cli` e um modelo multilíngue estiverem instalados:
+
+```bash
+export OPENCODE_WHISPER_MODEL=/caminho/ggml-base.bin
+```
+
+O TUI também detecta automaticamente os arquivos locais do projeto em `.opencode/voice/` (`whisper/bin/whisper-cli`, `whisper/ggml-small.bin` e `piper/piper/piper` com `pt_BR-faber-medium.onnx`). Use `OPENCODE_VOICE_DIR` para apontar outro diretório local.
+
+Para um modelo PocketSphinx local, defina `OPENCODE_STT_MODEL` com o diretório do modelo. A OpenAI é opt-in: use `OPENCODE_STT_BACKEND=openai` e `OPENAI_API_KEY` somente se quiser transcrição remota.
+
+A leitura usa vozes do sistema por padrão. Para uma voz brasileira mais natural, instale o Piper e um modelo `pt-BR`; o OpenCode o usa automaticamente quando `piper` e `OPENCODE_TTS_MODEL` estiverem disponíveis. O layout local `.opencode/voice/piper/` também é detectado automaticamente:
+
+```bash
+export OPENCODE_TTS_MODEL=/caminho/pt_BR-faber-medium.onnx
+```
+
+Também é possível informar qualquer comando local com `OPENCODE_TTS_COMMAND`; o texto é enviado por stdin, a menos que o comando contenha `{text}`. `OPENCODE_TTS_VOICE`, `OPENCODE_TTS_RATE` e `OPENCODE_TTS_PITCH` ajustam o fallback `spd-say`.
+
 ### Agents
 
 O OpenCode inclui dois agents integrados, que você pode alternar com a tecla `Tab`.

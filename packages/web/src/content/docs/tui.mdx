@@ -416,6 +416,26 @@ The TUI can request attention for questions, permissions, session errors, and co
 - `sound_pack` - Sound pack ID to use. Defaults to `opencode.default`.
 - `sounds` - Override sound files for `default`, `question`, `permission`, `error`, `done`, or `subagent_done`. Paths can be absolute, `file://` URLs, or relative to `tui.json`.
 
+### Read aloud and voice conversation
+
+Click `♪` on a completed assistant response to read it aloud. The TUI cleans up Markdown and URLs, detects the response language, and selects a matching installed voice. The microphone control is shown next to the prompt on both the home screen and active sessions, and `Ctrl+Alt+V` toggles it. The first click records, the second stops and submits the transcript, the completed response is spoken, and the next click resumes listening. Set `OPENCODE_MIC_DEVICE` when the default `ffmpeg` input is not the desired microphone.
+
+Transcription is local by default. Configure one of these options:
+
+```bash
+export OPENCODE_STTS_COMMAND='["python3","/path/to/stt.py","{file}"]'
+# or use whisper.cpp
+export OPENCODE_WHISPER_MODEL=/path/to/ggml-base.bin
+# or use a local PocketSphinx model
+export OPENCODE_STT_MODEL=/path/to/pocketsphinx/model/pt-br
+```
+
+The TUI also detects project-local assets under `.opencode/voice/` automatically: `whisper/bin/whisper-cli`, `whisper/ggml-small.bin`, and `piper/piper/piper` with `pt_BR-faber-medium.onnx`. Set `OPENCODE_VOICE_DIR` to use another directory.
+
+The local command receives the WAV path as its final argument and may print plain text or `{"text":"...","language":"pt-BR"}`. Remote OpenAI transcription is opt-in only: set `OPENCODE_STT_BACKEND=openai` and `OPENAI_API_KEY`.
+
+System voices are the read-aloud fallback. For a more natural Brazilian voice, install [Piper](https://github.com/rhasspy/piper) and set `OPENCODE_TTS_MODEL=/path/to/pt_BR-voice.onnx`; OpenCode plays it through the available system audio player. Any other local TTS command can be configured with `OPENCODE_TTS_COMMAND`. `OPENCODE_TTS_VOICE`, `OPENCODE_TTS_RATE`, and `OPENCODE_TTS_PITCH` tune the `spd-say` fallback.
+
 ---
 
 ## Customization

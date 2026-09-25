@@ -48,7 +48,7 @@
 - **Background terminal** — long-running shell commands run in the background, so the agent stays responsive. You get notified when they finish, and live output is streamed while they run.
 - **Live Shell panel** — the TUI shows the current output of running background commands in a panel above the prompt. Click a command to focus it and scroll with ↑/↓.
 - **Edit last message** — press `↑` in the prompt to reload the last message you sent in the current session and edit it.
-- **Read responses aloud** — click `♪` on a finished response to hear it spoken in its detected language (uses `say`, `espeak-ng`/`espeak`, or the Windows PowerShell speech synthesizer). Click again to stop.
+- **Natural read-aloud and voice conversation** — the TUI uses a Brazilian Portuguese voice when available, cleans up Markdown, and can record, transcribe, submit, and speak a conversation from the microphone beside the prompt.
 
 ---
 
@@ -69,6 +69,36 @@ paru -S opencode-bin               # Arch Linux (Latest from AUR)
 mise use -g opencode               # Any OS
 nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
 ```
+
+### TUI voice and read-aloud
+
+The microphone control is shown next to the prompt on both the home screen and active sessions, and `Ctrl+Alt+V` toggles it. The first click records, the second stops and submits the transcript, the completed response is spoken, and the next click resumes listening. `OPENCODE_MIC_DEVICE` selects another `ffmpeg` input device.
+
+The default speech-to-text path is local and never uploads audio:
+
+```bash
+sudo apt install ffmpeg
+export OPENCODE_STTS_COMMAND='["python3","/path/to/stt.py","{file}"]'
+# stt.py receives the WAV path and prints {"text":"...","language":"pt-BR"}
+```
+
+You can also use `whisper.cpp` when `whisper-cli` and a multilingual model are installed:
+
+```bash
+export OPENCODE_WHISPER_MODEL=/path/to/ggml-base.bin
+```
+
+The TUI also detects project-local assets automatically under `.opencode/voice/` (`whisper/bin/whisper-cli`, `whisper/ggml-small.bin`, and `piper/piper/piper` with `pt_BR-faber-medium.onnx`). Set `OPENCODE_VOICE_DIR` to use another project-local directory.
+
+For a local PocketSphinx model, set `OPENCODE_STT_MODEL` to the model directory. OpenAI is opt-in only; set `OPENCODE_STT_BACKEND=openai` and `OPENAI_API_KEY` if you explicitly want remote transcription.
+
+System read-aloud voices are used by default. For a natural Brazilian voice, install Piper and a `pt-BR` model; OpenCode plays it automatically when `piper` and `OPENCODE_TTS_MODEL` are available. The project-local `.opencode/voice/piper/` layout is detected automatically as well:
+
+```bash
+export OPENCODE_TTS_MODEL=/path/to/pt_BR-faber-medium.onnx
+```
+
+You can also provide any local TTS command with `OPENCODE_TTS_COMMAND`; text is sent through stdin unless the command contains `{text}`. `OPENCODE_TTS_VOICE`, `OPENCODE_TTS_RATE`, and `OPENCODE_TTS_PITCH` tune the system `spd-say` fallback.
 
 > [!TIP]
 > Remove versions older than 0.1.x before installing.

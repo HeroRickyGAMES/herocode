@@ -26,6 +26,7 @@ import { Spinner } from "../../component/spinner"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
+import { MicrophoneButton } from "../../component/prompt/microphone"
 import type {
   AssistantMessage,
   Part,
@@ -62,6 +63,7 @@ import { Toast, useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv.tsx"
 import stripAnsi from "strip-ansi"
 import { usePromptRef } from "../../context/prompt"
+import { useVoice } from "../../context/voice"
 import { useEpilogue } from "../../context/epilogue"
 import { normalizePath } from "../../util/path"
 import { PermissionPrompt } from "./permission"
@@ -194,6 +196,7 @@ export function Session() {
   const kv = useKV()
   const { theme } = useTheme()
   const promptRef = usePromptRef()
+  const voice = useVoice()
   const session = createMemo(() => sync.session.get(route.sessionID))
   const location = createMemo(() => {
     const current = session()
@@ -355,6 +358,51 @@ export function Session() {
   const keymap = useOpencodeKeymap()
   const dialog = useDialog()
   const renderer = useRenderer()
+  const spokenAssistants = new Set<string>()
+  const rememberCompletedAssistants = () => {
+    for (const message of messages()) {
+      if (
+        message.role === "assistant" &&
+        message.time.completed !== undefined &&
+        Boolean(message.finish) &&
+        message.finish !== "tool-calls" &&
+        message.finish !== "unknown"
+      ) {
+        spokenAssistants.add(message.id)
+      }
+    }
+  }
+  const lastCompletedAssistant = createMemo(() =>
+    messages().findLast(
+      (message): message is AssistantMessage =>
+        message.role === "assistant" &&
+        message.time.completed !== undefined &&
+        Boolean(message.finish) &&
+        message.finish !== "tool-calls" &&
+        message.finish !== "unknown",
+    ),
+  )
+  const lastAssistantText = createMemo(() => {
+    const message = lastCompletedAssistant()
+    if (!message) return ""
+    return (sync.data.part[message.id] ?? [])
+      .filter((part): part is TextPart => part.type === "text" && !part.synthetic && !part.ignored)
+      .map((part) => part.text)
+      .join("\n")
+      .trim()
+  })
+  rememberCompletedAssistants()
+  createEffect(() => {
+    const message = lastCompletedAssistant()
+    const text = lastAssistantText()
+    const state = voice.state()
+    if (!message || !text || spokenAssistants.has(message.id)) return
+    if (!voice.active() || state === "recording" || state === "transcribing") return
+    spokenAssistants.add(message.id)
+    void voice.speakResponse(text, voice.language()).then((success) => {
+      if (!success && voice.state() === "error") spokenAssistants.delete(message.id)
+    })
+  })
 
   event.on("session.status", (evt) => {
     if (evt.properties.sessionID !== route.sessionID) return
@@ -1330,7 +1378,12 @@ export function Session() {
                         toBottom()
                       }}
                       sessionID={route.sessionID}
-                      right={<pluginRuntime.Slot name="session_prompt_right" session_id={route.sessionID} />}
+                      right={
+                        <box flexDirection="row" gap={1} alignItems="center">
+                          <MicrophoneButton state={voice.state} onToggle={voice.toggle} />
+                          <pluginRuntime.Slot name="session_prompt_right" session_id={route.sessionID} />
+                        </box>
+                      }
                     />
                   </pluginRuntime.Slot>
                 </Show>

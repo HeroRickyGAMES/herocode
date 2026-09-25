@@ -201,6 +201,8 @@ export type TuiPromptInfo = {
 export type TuiPromptRef = {
   focused: boolean
   current: TuiPromptInfo
+  insert?(text: string): void
+  mode?(): "normal" | "shell"
   set(prompt: TuiPromptInfo): void
   reset(): void
   blur(): void

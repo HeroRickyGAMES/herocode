@@ -1,4 +1,5 @@
 import { Prompt, type PromptRef } from "../component/prompt"
+import { MicrophoneButton } from "../component/prompt/microphone"
 import { createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { Logo } from "../component/logo"
 import { useSync } from "../context/sync"
@@ -6,6 +7,7 @@ import { Toast } from "../ui/toast"
 import { useArgs } from "../context/args"
 import { useRouteData } from "../context/route"
 import { usePromptRef } from "../context/prompt"
+import { useVoice } from "../context/voice"
 import { useLocal } from "../context/local"
 import { usePluginRuntime } from "../plugin/runtime"
 import { useEditorContext } from "../context/editor"
@@ -24,6 +26,7 @@ export function Home() {
   const sync = useSync()
   const route = useRouteData("home")
   const promptRef = usePromptRef()
+  const voice = useVoice()
   const [ref, setRef] = createSignal<PromptRef | undefined>()
   const args = useArgs()
   const local = useLocal()
@@ -80,7 +83,16 @@ export function Home() {
         <box height={1} minHeight={0} flexShrink={1} />
         <box width="100%" maxWidth={promptMaxWidth()} zIndex={1000} paddingTop={1} flexShrink={0}>
           <pluginRuntime.Slot name="home_prompt" mode="replace" ref={bind}>
-            <Prompt ref={bind} right={<pluginRuntime.Slot name="home_prompt_right" />} placeholders={placeholder} />
+            <Prompt
+              ref={bind}
+              right={
+                <box flexDirection="row" gap={1} alignItems="center">
+                  <MicrophoneButton state={voice.state} onToggle={voice.toggle} />
+                  <pluginRuntime.Slot name="home_prompt_right" />
+                </box>
+              }
+              placeholders={placeholder}
+            />
           </pluginRuntime.Slot>
         </box>
         <pluginRuntime.Slot name="home_bottom" />

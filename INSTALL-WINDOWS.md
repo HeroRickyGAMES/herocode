@@ -38,6 +38,20 @@ cd C:\caminho\do\projeto
 opencode
 ```
 
+## Voz em português brasileiro
+
+O botão de microfone aparece na tela inicial e nas sessões ativas, ao lado do prompt. O primeiro clique grava, o segundo interrompe e envia, e a resposta é falada automaticamente. `Ctrl+Alt+V` alterna o microfone e `OPENCODE_MIC_DEVICE` seleciona o dispositivo de entrada quando necessário.
+
+A transcrição é local por padrão. No PowerShell, instale `ffmpeg` e configure um comando local:
+
+```powershell
+$env:OPENCODE_STTS_COMMAND='["python3","C:\\caminho\\stt.py","{file}"]'
+```
+
+O comando recebe o WAV e pode imprimir texto simples ou `{"text":"...","language":"pt-BR"}`. A OpenAI só é usada quando `OPENCODE_STT_BACKEND=openai` e `OPENAI_API_KEY` estiverem definidos explicitamente.
+
+Para uma voz brasileira mais natural, instale um motor local como Piper e configure `OPENCODE_TTS_MODEL`; para outro motor, use `OPENCODE_TTS_COMMAND`. Sem esses modelos, o TUI usa a voz `pt-BR` instalada pelo Windows como fallback.
+
 ## Problemas comuns
 
 - **`opencode` não é reconhecido**: verifique a etapa 4 e reabra o terminal.

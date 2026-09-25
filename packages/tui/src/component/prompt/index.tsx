@@ -57,6 +57,7 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
+import { insertPromptAtCursor } from "../../util/microphone"
 
 registerOpencodeSpinner()
 
@@ -89,10 +90,12 @@ function pastedFilepath(value: string, platform: string) {
 export type PromptRef = {
   focused: boolean
   current: PromptInfo
+  mode?(): "normal" | "shell"
   set(prompt: PromptInfo): void
   reset(): void
   blur(): void
   focus(): void
+  insert?(text: string): void
   submit(): void
 }
 
@@ -613,11 +616,28 @@ export function Prompt(props: PromptProps) {
     get current() {
       return store.prompt
     },
+    mode() {
+      return store.mode
+    },
     focus() {
       input.focus()
     },
     blur() {
       input.blur()
+    },
+    insert(text) {
+      if (!input || input.isDestroyed || !text) return
+      const next = insertPromptAtCursor(input.plainText, input.cursorOffset, text)
+      input.insertText(text)
+      input.cursorOffset = next.cursor
+      setStore("prompt", "input", input.plainText)
+      syncExtmarksWithPromptParts()
+      setCursorVersion((value) => value + 1)
+      setTimeout(() => {
+        if (!input || input.isDestroyed) return
+        input.getLayoutNode().markDirty()
+        renderer.requestRender()
+      }, 0)
     },
     set(prompt) {
       input.setText(prompt.input)
