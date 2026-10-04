@@ -69,10 +69,13 @@ export function getCurrentCli(target = RUST_TARGET ?? nativeTarget()) {
   return binaryConfig
 }
 
-export async function downloadCliToResources() {
-  const cli = getCurrentCli()
+export async function downloadCliToResources(target = RUST_TARGET ?? nativeTarget()) {
+  const cli = getCurrentCli(target)
   const directory = await mkdtemp(join(tmpdir(), "opencode-cli-"))
-  const dest = windowsify("resources/opencode-cli")
+  // Cross-builds target a foreign platform, so the extension follows the CLI package
+  // rather than the build host. The packaged app resolves this name from
+  // process.platform at runtime.
+  const dest = cli.os === "win32" ? windowsify("resources/opencode-cli", true) : "resources/opencode-cli"
   try {
     await $`bun install --no-save --cwd ${directory} ${`${cli.package}@${CLI_VERSION}`} ${`--os=${cli.os}`} ${`--cpu=${cli.cpu}`}`
     await copyFile(
@@ -82,16 +85,16 @@ export async function downloadCliToResources() {
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
-  if (process.platform !== "win32") await chmod(dest, 0o755)
-  if (process.platform === "win32" && process.env.GITHUB_ACTIONS === "true") {
+  if (cli.os !== "win32") await chmod(dest, 0o755)
+  if (cli.os === "win32" && process.env.GITHUB_ACTIONS === "true" && process.platform === "win32") {
     await $`pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ../../script/sign-windows.ps1 ${dest}`
   }
-  if (process.platform === "darwin") await $`codesign --force --sign - ${dest}`
+  if (cli.os === "darwin" && process.platform === "darwin") await $`codesign --force --sign - ${dest}`
 
   console.log(`Copied ${cli.package} to ${dest}`)
 }
 
-export function windowsify(path: string) {
+export function windowsify(path: string, windows = process.platform === "win32") {
   if (path.endsWith(".exe")) return path
-  return `${path}${process.platform === "win32" ? ".exe" : ""}`
+  return `${path}${windows ? ".exe" : ""}`
 }

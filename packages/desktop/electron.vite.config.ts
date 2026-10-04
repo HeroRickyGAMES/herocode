@@ -12,8 +12,6 @@ const channel = (() => {
   return "dev"
 })()
 
-const nodePtyPkg = `@lydell/node-pty-${process.platform}-${process.arch}`
-
 const sentry =
   process.env.SENTRY_AUTH_TOKEN && process.env.SENTRY_ORG && process.env.SENTRY_PROJECT
     ? sentryVitePlugin({
@@ -51,16 +49,12 @@ const require = __cjs_mod__.createRequire(import.meta.url);
 `,
         },
       },
-      externalizeDeps: { include: [nodePtyPkg] },
+      // @lydell/node-pty resolves its prebuilt addon from process.platform/process.arch at
+      // runtime, so it must stay external and un-narrowed. Pinning it here would lock the
+      // bundle to the build host and break Windows x64/arm64 cross-builds.
+      externalizeDeps: { include: ["@lydell/node-pty"] },
     },
     plugins: [
-      {
-        name: "opencode:node-pty-narrower",
-        enforce: "pre",
-        resolveId(s) {
-          if (s === "@lydell/node-pty") return nodePtyPkg
-        },
-      },
       {
         name: "opencode:virtual-server-module",
         enforce: "pre",

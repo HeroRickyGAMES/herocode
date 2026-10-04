@@ -19,8 +19,10 @@
     "package": "electron-builder --config electron-builder.config.ts",
     "package:mac": "electron-builder --mac --config electron-builder.config.ts",
     "package:win": "electron-builder --win --config electron-builder.config.ts",
-    "package:linux": "electron-builder --linux --config electron-builder.config.ts",
-    "native:build": "bun install --cwd native"
+    "package:win:x64": "electron-builder --win --x64 --config electron-builder.config.ts",
+    "package:win:arm64": "electron-builder --win --arm64 --config electron-builder.config.ts",
+    "package:win:all": "bun ./scripts/package-windows.ts",
+    "package:linux": "electron-builder --linux --config electron-builder.config.ts"
   },
   "main": "./out/main/index.js",
   "dependencies": {
