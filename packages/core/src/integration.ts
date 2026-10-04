@@ -517,4 +517,4 @@ export const locationLayer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: [Credential.node, EventV2.node] })
+export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: () => [Credential.node, EventV2.node] })

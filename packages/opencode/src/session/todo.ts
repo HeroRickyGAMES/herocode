@@ -69,6 +69,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node, Database.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [EventV2Bridge.node, Database.node] })
 
 export * as Todo from "./todo"

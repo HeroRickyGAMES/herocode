@@ -2157,7 +2157,7 @@ export function parseModel(model: string) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [
+  deps: () => [
     FSUtil.node,
     Config.node,
     Auth.node,

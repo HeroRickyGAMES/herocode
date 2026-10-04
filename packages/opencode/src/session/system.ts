@@ -142,13 +142,13 @@ const layer = Layer.effect(
 const locationServiceMapNode = LayerNode.make({
   service: LocationServiceMap.Service,
   layer: locationServiceMapLayer,
-  deps: [],
+  deps: () => [],
 })
 
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Skill.node, MCP.node, locationServiceMapNode],
+  deps: () => [Skill.node, MCP.node, locationServiceMapNode],
 })
 
 export * as SystemPrompt from "./system"

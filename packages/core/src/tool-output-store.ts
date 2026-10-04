@@ -192,9 +192,9 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [FSUtil.node, Global.node, Config.node] })
+export const node = makeLocationNode({ service: Service, layer, deps: () => [FSUtil.node, Global.node, Config.node] })
 
-export const nodeWithoutConfig = makeLocationNode({ service: Service, layer, deps: [FSUtil.node, Global.node] })
+export const nodeWithoutConfig = makeLocationNode({ service: Service, layer, deps: () => [FSUtil.node, Global.node] })
 
 /** Runs retention scanning once globally rather than once per active Location. */
 export const cleanupLayer = Layer.effectDiscard(
@@ -207,5 +207,5 @@ export const cleanupLayer = Layer.effectDiscard(
 export const cleanupNode = makeGlobalNode({
   name: "tool-output-cleanup",
   layer: Layer.merge(layer, cleanupLayer.pipe(Layer.provide(layer))),
-  deps: [FSUtil.node, Global.node],
+  deps: () => [FSUtil.node, Global.node],
 })

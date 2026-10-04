@@ -75,4 +75,4 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [EventV2.node, Database.node] })
+export const node = makeLocationNode({ service: Service, layer, deps: () => [EventV2.node, Database.node] })

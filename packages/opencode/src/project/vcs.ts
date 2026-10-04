@@ -418,6 +418,6 @@ const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Service> = 
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Git.node, EventV2Bridge.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [Git.node, EventV2Bridge.node] })
 
 export * as Vcs from "./vcs"

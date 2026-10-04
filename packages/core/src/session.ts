@@ -474,7 +474,7 @@ const resolvePrompt = (input: PromptInput.Prompt) =>
 export const node = makeGlobalNode({
   service: Service,
   layer: layer.pipe(Layer.orDie),
-  deps: [
+  deps: () => [
     Database.node,
     EventV2.node,
     ProjectV2.node,

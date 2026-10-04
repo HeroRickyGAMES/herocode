@@ -223,5 +223,5 @@ export const locationLayer = layer.pipe(Layer.provideMerge(Policy.locationLayer)
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [FSUtil.node, Global.node, Location.node, Policy.node],
+  deps: () => [FSUtil.node, Global.node, Location.node, Policy.node],
 })

@@ -52,7 +52,7 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, Session.node, ShareNext.node, RuntimeFlags.node],
+  deps: () => [Config.node, Session.node, ShareNext.node, RuntimeFlags.node],
 })
 
 export * as SessionShare from "./session"

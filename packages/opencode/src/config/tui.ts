@@ -259,7 +259,7 @@ const layer = Layer.effect(
   }).pipe(Effect.withSpan("TuiConfig.layer")),
 )
 
-export const node = LayerNode.make({ service: Service, layer, deps: [Npm.node, FSUtil.node] })
+export const node = LayerNode.make({ service: Service, layer, deps: () => [Npm.node, FSUtil.node] })
 
 const { runPromise } = makeRuntime(Service, AppNodeBuilder.build(node))
 

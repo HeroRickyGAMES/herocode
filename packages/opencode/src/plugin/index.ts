@@ -312,7 +312,7 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [EventV2Bridge.node, Config.node, RuntimeFlags.node],
+  deps: () => [EventV2Bridge.node, Config.node, RuntimeFlags.node],
 })
 
 export * as Plugin from "."

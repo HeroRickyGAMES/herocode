@@ -306,5 +306,5 @@ export const locationLayer = layer.pipe(Layer.provideMerge(AgentV2.locationLayer
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [EventV2.node, Location.node, AgentV2.node, SessionStore.node, PermissionSaved.node],
+  deps: () => [EventV2.node, Location.node, AgentV2.node, SessionStore.node, PermissionSaved.node],
 })

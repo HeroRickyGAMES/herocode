@@ -256,6 +256,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [CrossSpawnSpawner.node] })
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: () => [CrossSpawnSpawner.node] })
 
 export * as AppProcess from "./process"

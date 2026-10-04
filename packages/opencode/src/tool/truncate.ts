@@ -151,6 +151,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [FSUtil.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [FSUtil.node] })
 
 export * as Truncate from "./truncate"

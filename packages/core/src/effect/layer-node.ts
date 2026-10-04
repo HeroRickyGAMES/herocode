@@ -68,14 +68,32 @@ export function tags<const Config extends { readonly [Name in keyof Config]: rea
 
 // Nodes ---------------------------------------------------------------------
 
+// Dependencies are read through a thunk. A node graph is wired while modules
+// evaluate, so capturing the imported bindings in a plain array yields
+// `undefined` for any node whose defining module the bundler happens to evaluate
+// later. Chunk order shifts with platform-conditional imports, which is why this
+// only surfaced on Windows. Reading on first access defers the lookup until every
+// module has been evaluated.
+export type Deps<Items extends readonly AnyNode[]> = Items | (() => Items)
+
 type MakeInput<
   Implementation extends Layer.Any,
   Items extends NodeList,
   T extends Tag | undefined = undefined,
 > = NodeIdentity & {
   readonly layer: Implementation
-  readonly deps: Items & CheckDependencies<Implementation, NoInfer<Items>>
+  readonly deps: Deps<Items & CheckDependencies<Implementation, NoInfer<Items>>>
   readonly tag?: T
+}
+
+function readDependencies(deps: Deps<readonly AnyNode[]>, owner: string): readonly AnyNode[] {
+  const resolved = typeof deps === "function" ? deps() : deps
+  const missing = resolved.findIndex((dep) => dep === undefined)
+  if (missing !== -1)
+    throw new Error(
+      `Layer node "${owner}" has an unresolved dependency at index ${missing}. Its defining module was evaluated after this node.`,
+    )
+  return resolved
 }
 
 export function make<
@@ -85,12 +103,17 @@ export function make<
 >(
   input: MakeInput<Implementation, Items, T>,
 ): Node<Layer.Success<Implementation>, Layer.Error<Implementation> | Error<Items[number]>, T> {
+  let resolved: readonly AnyNode[] | undefined
+  const name = input.service !== undefined ? input.service.key : input.name
   return {
     kind: "layer",
-    name: input.service !== undefined ? input.service.key : input.name,
+    name,
     service: input.service,
     implementation: input.layer,
-    dependencies: input.deps,
+    get dependencies() {
+      resolved ??= readDependencies(input.deps, name)
+      return resolved
+    },
     tag: input.tag,
   }
 }
@@ -106,9 +129,17 @@ export function unbound<R, Shape, const T extends Tag>(service: Context.Key<R, S
 }
 
 export function group<const Items extends readonly AnyNode[]>(
-  dependencies: Items,
+  dependencies: Deps<Items>,
 ): Node<Output<Items[number]>, Error<Items[number]>, NodeTag<Items[number]>> {
-  return { kind: "group", name: "group", dependencies }
+  let resolved: readonly AnyNode[] | undefined
+  return {
+    kind: "group",
+    name: "group",
+    get dependencies() {
+      resolved ??= readDependencies(dependencies, "group")
+      return resolved
+    },
+  }
 }
 
 export type Replacement = readonly [source: AnyNode, replacement: AnyNode | Layer.Any]
@@ -138,7 +169,7 @@ function replacementNode(source: AnyNode, replacement: AnyNode | Layer.Any) {
     : make({
         ...nodeMakeIdentity(source),
         layer: replacement as Layer.Layer<unknown, unknown>,
-        deps: [],
+        deps: () => [],
         tag: source.tag,
       })
   if (source.name !== replacementNode.name) {

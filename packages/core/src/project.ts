@@ -132,5 +132,5 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, Git.node, ProjectDirectories.node],
+  deps: () => [FSUtil.node, Git.node, ProjectDirectories.node],
 })

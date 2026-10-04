@@ -39,7 +39,7 @@ import { ToolOutputStore } from "./tool-output-store"
 
 export { LocationServiceMap } from "./location-service-map"
 
-export const locationServices = LayerNode.group([
+export const locationServices = LayerNode.group(() => [
   Location.node,
   Policy.node,
   Config.node,

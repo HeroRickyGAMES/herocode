@@ -54,4 +54,4 @@ export function path() {
   return join(Global.Path.data, `opencode-${InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
 }
 
-export const node = makeGlobalNode({ service: Service, layer: layerFromPath(path()), deps: [] })
+export const node = makeGlobalNode({ service: Service, layer: layerFromPath(path()), deps: () => [] })

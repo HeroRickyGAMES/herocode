@@ -261,6 +261,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, EventV2.node, httpClient] })
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: () => [FSUtil.node, EventV2.node, httpClient] })
 
 export * as ModelsDev from "./models-dev"

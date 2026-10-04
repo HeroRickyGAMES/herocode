@@ -13,7 +13,7 @@ import * as Observability from "@opencode-ai/core/observability"
 import { memoMap } from "@opencode-ai/core/effect/memo-map"
 
 export const BootstrapLayer = AppNodeBuilder.build(
-  LayerNode.group([Config.node, Plugin.node, ShareNext.node, Format.node, LSP.node, Vcs.node, Snapshot.node]),
+  LayerNode.group(() => [Config.node, Plugin.node, ShareNext.node, Format.node, LSP.node, Vcs.node, Snapshot.node]),
 ).pipe(Layer.provide(Observability.layer))
 
 export const BootstrapRuntime = ManagedRuntime.make(BootstrapLayer, { memoMap })

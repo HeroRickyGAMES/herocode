@@ -210,7 +210,7 @@ type RouteRequirements =
   | HttpRouter.Request<"Requires", unknown>
   | HttpRouter.Request<"GlobalRequires", never>
 
-const app = LayerNode.group([
+const app = LayerNode.group(() => [
   Npm.node,
   FSUtil.node,
   Database.node,

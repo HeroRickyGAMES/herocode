@@ -501,7 +501,7 @@ export * as Diagnostic from "./diagnostic"
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, RuntimeFlags.node, FSUtil.node, EventV2Bridge.node],
+  deps: () => [Config.node, RuntimeFlags.node, FSUtil.node, EventV2Bridge.node],
 })
 
 export * as LSP from "./lsp"

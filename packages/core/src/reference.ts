@@ -121,5 +121,5 @@ export const locationLayer = layer
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Global.node, EventV2.node, RepositoryCache.node],
+  deps: () => [Global.node, EventV2.node, RepositoryCache.node],
 })

@@ -281,4 +281,4 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [RipgrepBinary.node, AppProcess.node] })
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: () => [RipgrepBinary.node, AppProcess.node] })

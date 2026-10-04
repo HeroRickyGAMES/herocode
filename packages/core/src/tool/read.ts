@@ -113,5 +113,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/read",
   layer,
-  deps: [ToolRegistry.node, ReadToolFileSystem.node, LocationMutation.node, Image.node, PermissionV2.node],
+  deps: () => [ToolRegistry.node, ReadToolFileSystem.node, LocationMutation.node, Image.node, PermissionV2.node],
 })

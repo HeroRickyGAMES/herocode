@@ -21,4 +21,4 @@ export const layer = Layer.unwrap(
   }),
 )
 
-export const node = LayerNode.make({ name: "observability", layer, deps: [] })
+export const node = LayerNode.make({ name: "observability", layer, deps: () => [] })

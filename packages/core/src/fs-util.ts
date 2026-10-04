@@ -218,7 +218,7 @@ export namespace FSUtil {
     }),
   )
 
-  export const node = makeGlobalNode({ service: Service, layer: layer, deps: [filesystem] })
+  export const node = makeGlobalNode({ service: Service, layer: layer, deps: () => [filesystem] })
 
   // Pure helpers that don't need Effect (path manipulation, sync operations)
   export function mimeType(p: string): string {

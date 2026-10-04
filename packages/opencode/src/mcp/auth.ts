@@ -158,6 +158,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [FSUtil.node, EffectFlock.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [FSUtil.node, EffectFlock.node] })
 
 export * as McpAuth from "./auth"

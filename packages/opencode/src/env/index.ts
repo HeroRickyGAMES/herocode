@@ -36,6 +36,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [] })
 
 export * as Env from "."

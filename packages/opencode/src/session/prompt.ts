@@ -1598,7 +1598,7 @@ const quoteTrimRegex = /^["']|["']$/g
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [
+  deps: () => [
     SessionStatus.node,
     Session.node,
     Agent.node,

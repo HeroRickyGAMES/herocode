@@ -441,13 +441,13 @@ const layer = Layer.effect(
 const locationServiceMapNode = LayerNode.make({
   service: LocationServiceMap.Service,
   layer: locationServiceMapLayer,
-  deps: [],
+  deps: () => [],
 })
 
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, Auth.node, Plugin.node, Skill.node, Provider.node, locationServiceMapNode],
+  deps: () => [Config.node, Auth.node, Plugin.node, Skill.node, Provider.node, locationServiceMapNode],
 })
 
 export * as Agent from "./agent"

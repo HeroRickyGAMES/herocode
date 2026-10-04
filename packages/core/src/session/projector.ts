@@ -452,4 +452,4 @@ const layer = Layer.effectDiscard(
   }),
 )
 
-export const node = makeGlobalNode({ name: "session-projector", layer, deps: [EventV2.node, Database.node] })
+export const node = makeGlobalNode({ name: "session-projector", layer, deps: () => [EventV2.node, Database.node] })

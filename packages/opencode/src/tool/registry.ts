@@ -427,7 +427,7 @@ function isJsonSchemaObject(value: unknown): value is Record<string, unknown> {
 export const node = LayerNode.make({
   service: Service,
   layer,
-  deps: [
+  deps: () => [
     Config.node,
     Plugin.node,
     Question.node,

@@ -204,9 +204,9 @@ const layer = Layer.effect(
 export const loaderNode = LayerNode.make({
   service: Loader,
   layer: loaderLayer,
-  deps: [Provider.node, Agent.node, Command.node, InstanceStore.node],
+  deps: () => [Provider.node, Agent.node, Command.node, InstanceStore.node],
 })
 
-export const node = LayerNode.make({ service: Service, layer, deps: [loaderNode] })
+export const node = LayerNode.make({ service: Service, layer, deps: () => [loaderNode] })
 
 export * as Directory from "./directory"

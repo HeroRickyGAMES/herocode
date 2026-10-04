@@ -502,6 +502,6 @@ const layer: Layer.Layer<ChildProcessSpawner, never, FileSystem.FileSystem | Pat
   make,
 )
 
-export const node = makeGlobalNode({ service: ChildProcessSpawner, layer, deps: [filesystem, path] })
+export const node = makeGlobalNode({ service: ChildProcessSpawner, layer, deps: () => [filesystem, path] })
 
 export * as CrossSpawnSpawner from "./cross-spawn-spawner"

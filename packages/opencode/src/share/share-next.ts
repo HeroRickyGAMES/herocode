@@ -365,7 +365,7 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Account.node, EventV2Bridge.node, Config.node, Database.node, httpClient, Provider.node, Session.node],
+  deps: () => [Account.node, EventV2Bridge.node, Config.node, Database.node, httpClient, Provider.node, Session.node],
 })
 
 export * as ShareNext from "./share-next"

@@ -83,7 +83,7 @@ export const defaultConfigLayer = Layer.sync(ConfigService, () =>
   }),
 )
 
-export const configNode = makeLocationNode({ service: ConfigService, layer: defaultConfigLayer, deps: [] })
+export const configNode = makeLocationNode({ service: ConfigService, layer: defaultConfigLayer, deps: () => [] })
 
 export function selectProvider(
   sessionID: string,
@@ -256,5 +256,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/websearch",
   layer,
-  deps: [ToolRegistry.node, PermissionV2.node, LayerNodePlatform.httpClient, configNode],
+  deps: () => [ToolRegistry.node, PermissionV2.node, LayerNodePlatform.httpClient, configNode],
 })

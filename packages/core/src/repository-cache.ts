@@ -243,7 +243,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | Git.Service | EffectFl
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [EffectFlock.node, FSUtil.node, Git.node, Global.node],
+  deps: () => [EffectFlock.node, FSUtil.node, Git.node, Global.node],
 })
 
 function errorMessage(error: unknown) {

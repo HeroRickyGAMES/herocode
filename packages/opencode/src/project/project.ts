@@ -468,7 +468,7 @@ export const use = serviceUse(Service)
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [
+  deps: () => [
     FSUtil.node,
     AppProcess.node,
     CrossSpawnSpawner.node,

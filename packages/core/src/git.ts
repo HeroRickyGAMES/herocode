@@ -943,7 +943,7 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, AppProcess.node] })
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: () => [FSUtil.node, AppProcess.node] })
 
 interface Result {
   readonly exitCode: number

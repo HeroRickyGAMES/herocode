@@ -254,6 +254,11 @@ export const RunCommand = effectCmd({
         hidden: true,
         default: false,
       })
+      .option("aceita-tudo", {
+        type: "boolean",
+        describe: "auto-accept all permission requests, accepts everything (dangerous!)",
+        default: false,
+      })
       .option("demo", {
         type: "boolean",
         default: false,
@@ -271,7 +276,7 @@ export const RunCommand = effectCmd({
     yield* Effect.promise(async () => {
       const rawMessage = [...args.message, ...(args["--"] || [])].join(" ")
       const interactive = args.mini
-      const auto = args.auto || args.yolo || args["dangerously-skip-permissions"]
+      const auto = args.auto || args.yolo || args["dangerously-skip-permissions"] || args["aceita-tudo"]
       const thinking = interactive ? (args.thinking ?? true) : (args.thinking ?? false)
       const die = (message: string): never => {
         UI.error(message)
@@ -1011,6 +1016,8 @@ export async function runMini(input: MiniCommandInput) {
     yolo: false,
     "dangerously-skip-permissions": false,
     dangerouslySkipPermissions: false,
+    "aceita-tudo": false,
+    aceitaTudo: false,
     demo: input.demo ?? false,
   })
 }

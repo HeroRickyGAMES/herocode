@@ -137,11 +137,11 @@ function whollyDisabled(action: string, rules: PermissionV2.Ruleset) {
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [ApplicationTools.node, ToolOutputStore.node],
+  deps: () => [ApplicationTools.node, ToolOutputStore.node],
 })
 
 export const toolsNode = makeLocationNode({
   service: Tools.Service,
   layer,
-  deps: [ApplicationTools.node, ToolOutputStore.node],
+  deps: () => [ApplicationTools.node, ToolOutputStore.node],
 })

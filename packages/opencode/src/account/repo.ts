@@ -166,6 +166,6 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Database.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [Database.node] })
 
 export * as AccountRepo from "./repo"

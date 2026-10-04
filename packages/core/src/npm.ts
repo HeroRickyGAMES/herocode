@@ -251,7 +251,7 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, Global.node, filesystem, EffectFlock.node],
+  deps: () => [FSUtil.node, Global.node, filesystem, EffectFlock.node],
 })
 
 const { runPromise } = makeRuntime(Service, LayerNode.compile(node))

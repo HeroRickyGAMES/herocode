@@ -231,7 +231,7 @@ export function loaded(messages: SessionV1.WithParts[]) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient],
+  deps: () => [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient],
 })
 
 export * as Instruction from "./instruction"

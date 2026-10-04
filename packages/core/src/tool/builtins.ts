@@ -31,7 +31,7 @@ import { WriteTool } from "./write"
 export const node = makeLocationNode({
   name: "built-in-tools",
   layer: Layer.empty,
-  deps: [
+  deps: () => [
     ApplyPatchTool.node,
     BashTool.node,
     EditTool.node,

@@ -617,7 +617,7 @@ const layer: Layer.Layer<
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, path, AppProcess.node, Git.node, Project.node, InstanceStore.node, Database.node],
+  deps: () => [FSUtil.node, path, AppProcess.node, Git.node, Project.node, InstanceStore.node, Database.node],
 })
 
 export * as Worktree from "."

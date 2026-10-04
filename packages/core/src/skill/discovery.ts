@@ -210,4 +210,4 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer, deps: [httpClient, FSUtil.node, Global.node] })
+export const node = makeGlobalNode({ service: Service, layer, deps: () => [httpClient, FSUtil.node, Global.node] })

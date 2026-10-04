@@ -154,7 +154,7 @@ export const locationLayer = layer.pipe(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [
+  deps: () => [
     EventV2.node,
     AgentV2.node,
     AISDK.node,

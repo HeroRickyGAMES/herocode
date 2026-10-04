@@ -201,7 +201,7 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer, deps: [] })
+export const node = LayerNode.make({ service: Service, layer, deps: () => [] })
 
 function makeSession(input: StoreInput): Info {
   return {

@@ -144,5 +144,5 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer,
-  deps: [Git.node, EventV2.node, ProjectV2.node, SessionStore.node],
+  deps: () => [Git.node, EventV2.node, ProjectV2.node, SessionStore.node],
 })

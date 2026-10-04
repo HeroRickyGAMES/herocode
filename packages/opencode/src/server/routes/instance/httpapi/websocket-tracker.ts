@@ -45,7 +45,7 @@ const layer = Layer.sync(Service)(() => {
   })
 })
 
-export const node = LayerNode.make({ service: Service, layer, deps: [] })
+export const node = LayerNode.make({ service: Service, layer, deps: () => [] })
 
 export const register = (close: Close) =>
   Effect.gen(function* () {

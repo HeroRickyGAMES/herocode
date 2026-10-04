@@ -90,5 +90,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/question",
   layer,
-  deps: [ToolRegistry.node, PermissionV2.node, QuestionV2.node],
+  deps: () => [ToolRegistry.node, PermissionV2.node, QuestionV2.node],
 })

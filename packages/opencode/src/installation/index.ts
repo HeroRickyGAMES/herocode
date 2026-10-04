@@ -325,7 +325,7 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [httpClient, AppProcess.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [httpClient, AppProcess.node] })
 
 const { runPromise } = makeRuntime(Service, AppNodeBuilder.build(node))
 

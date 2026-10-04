@@ -801,7 +801,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, AppProcess.node, Config.node],
+  deps: () => [FSUtil.node, AppProcess.node, Config.node],
 })
 
 export * as Snapshot from "."

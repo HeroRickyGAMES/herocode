@@ -58,5 +58,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/todowrite",
   layer,
-  deps: [ToolRegistry.node, PermissionV2.node, SessionTodo.node],
+  deps: () => [ToolRegistry.node, PermissionV2.node, SessionTodo.node],
 })

@@ -40,7 +40,7 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: SessionExecution.Service,
   layer,
-  deps: [SessionStore.node, LocationServiceMap.node],
+  deps: () => [SessionStore.node, LocationServiceMap.node],
 })
 
 export * as SessionExecutionLocal from "./local"

@@ -476,6 +476,6 @@ const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpCl
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [AccountRepo.node, httpClient] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [AccountRepo.node, httpClient] })
 
 export * as Account from "./account"

@@ -593,7 +593,7 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [
+  deps: () => [
     Config.node,
     Session.node,
     Agent.node,

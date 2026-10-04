@@ -52,7 +52,7 @@ const layer = Layer.effect(
 export const node = makeGlobalNode({
   service: Service,
   layer: layer,
-  deps: [Config.node, Format.node, LSP.node, Plugin.node, Project.node, ShareNext.node, Snapshot.node, Vcs.node],
+  deps: () => [Config.node, Format.node, LSP.node, Plugin.node, Project.node, ShareNext.node, Snapshot.node, Vcs.node],
 })
 
 export * as InstanceBootstrap from "./bootstrap"

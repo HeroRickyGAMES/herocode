@@ -35,5 +35,5 @@ export const boundNode = (ref: Ref) =>
   makeLocationNode({
     service: Service,
     layer: layer(ref),
-    deps: [Project.node],
+    deps: () => [Project.node],
   })

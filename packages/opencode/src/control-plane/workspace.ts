@@ -950,7 +950,7 @@ function route(url: string | URL, path: string) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [
+  deps: () => [
     Auth.node,
     Session.node,
     SessionPrompt.node,

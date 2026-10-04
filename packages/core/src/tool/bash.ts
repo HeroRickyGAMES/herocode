@@ -203,5 +203,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/bash",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node],
+  deps: () => [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node],
 })

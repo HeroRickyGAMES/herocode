@@ -57,7 +57,7 @@ import { AppNodeBuilderV1 } from "./app-node-builder-v1"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 
 export const AppLayer = AppNodeBuilderV1.build(
-  LayerNode.group([
+  LayerNode.group(() => [
     Npm.node,
     FSUtil.node,
     Database.node,

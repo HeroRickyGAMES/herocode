@@ -224,6 +224,6 @@ const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> = Layer.
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Auth.node, Plugin.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: () => [Auth.node, Plugin.node] })
 
 export * as ProviderAuth from "./auth"

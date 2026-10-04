@@ -132,7 +132,7 @@ export const locationLayer = layer.pipe(
 export const node = makeLocationNode({
   name: "plugin-internal",
   layer,
-  deps: [
+  deps: () => [
     Catalog.node,
     CommandV2.node,
     PluginV2.node,

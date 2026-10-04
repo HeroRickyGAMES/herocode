@@ -101,5 +101,5 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/glob",
   layer,
-  deps: [ToolRegistry.node, Ripgrep.node, Location.node, PermissionV2.node],
+  deps: () => [ToolRegistry.node, Ripgrep.node, Location.node, PermissionV2.node],
 })

@@ -215,4 +215,4 @@ export const locationLayer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: [Catalog.node, Integration.node] })
+export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: () => [Catalog.node, Integration.node] })

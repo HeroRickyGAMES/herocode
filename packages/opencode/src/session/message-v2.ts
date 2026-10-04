@@ -734,4 +734,4 @@ export function fromError(
 }
 
 export * as MessageV2 from "./message-v2"
-export const node = LayerNode.group([Database.node])
+export const node = LayerNode.group(() => [Database.node])

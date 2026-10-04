@@ -53,4 +53,4 @@ export const make = (ttl: Duration.Input = DEFAULT_TTL) =>
 
 const layer = Layer.effect(Service, make())
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [] })
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: () => [] })

@@ -76,7 +76,7 @@ const layer = Layer.effect(
   Effect.sync(() => Service.of(make())),
 )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [] })
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: () => [] })
 
 export const layerWith = (input: Partial<Interface>) =>
   Layer.effect(

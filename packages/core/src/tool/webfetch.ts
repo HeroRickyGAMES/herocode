@@ -183,7 +183,7 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/webfetch",
   layer,
-  deps: [ToolRegistry.node, PermissionV2.node, LayerNodePlatform.httpClient],
+  deps: () => [ToolRegistry.node, PermissionV2.node, LayerNodePlatform.httpClient],
 })
 
 export function extractTextFromHTML(html: string) {

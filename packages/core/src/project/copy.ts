@@ -282,11 +282,11 @@ export const locationLayer = layer
 export const node = makeLocationNode({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, Git.node, ProjectDirectories.node, EventV2.node, Database.node],
+  deps: () => [FSUtil.node, Git.node, ProjectDirectories.node, EventV2.node, Database.node],
 })
 
 export const refreshNode = makeLocationNode({
   name: "project-copy-refresh",
   layer: Layer.effectDiscard(refreshAfterBoot),
-  deps: [node, Location.node],
+  deps: () => [node, Location.node],
 })

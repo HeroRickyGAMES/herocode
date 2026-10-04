@@ -120,6 +120,11 @@ export const TuiThreadCommand = cmd({
         hidden: true,
         default: false,
       })
+      .option("aceita-tudo", {
+        type: "boolean",
+        describe: "auto-accept all permission requests, accepts everything (dangerous!)",
+        default: false,
+      })
       .option("mini", {
         type: "boolean",
         describe: "start the minimal interactive interface",
@@ -287,7 +292,7 @@ export const TuiThreadCommand = cmd({
               model: args.model,
               prompt,
               fork: args.fork,
-              auto: args.auto || args.yolo || args["dangerously-skip-permissions"],
+              auto: args.auto || args.yolo || args["dangerously-skip-permissions"] || args["aceita-tudo"],
             },
           }),
         )
