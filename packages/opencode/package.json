@@ -12,7 +12,9 @@
     "bench:test": "bun run script/bench-test-suite.ts",
     "profile:test": "bun run script/profile-test-files.ts",
     "build": "bun run script/build.ts",
+    "build:linux": "bun run script/build.ts --linux",
     "build:windows": "bun run script/build.ts --windows",
+    "build:dist": "bun run script/build.ts --linux --windows --skip-embed-web-ui",
     "dev": "bun run ./src/index.ts",
     "dev:temporary": "bun run ./src/temporary.ts"
   },

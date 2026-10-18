@@ -18,6 +18,7 @@ import pkg from "../package.json"
 
 const singleFlag = process.argv.includes("--single")
 const windowsFlag = process.argv.includes("--windows")
+const linuxFlag = process.argv.includes("--linux")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
@@ -134,8 +135,13 @@ const targets = singleFlag
 
       return true
     })
-  : windowsFlag
-    ? allTargets.filter((item) => item.os === "win32" && item.avx2 !== false && item.abi === undefined)
+  : linuxFlag || windowsFlag
+    ? allTargets.filter(
+        (item) =>
+          ((linuxFlag && item.os === "linux" && item.arch === "x64") || (windowsFlag && item.os === "win32")) &&
+          item.avx2 !== false &&
+          item.abi === undefined,
+      )
     : allTargets
 
 await $`rm -rf dist`
