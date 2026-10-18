@@ -49,6 +49,9 @@ function getRotator(id: string, target: string, onStatus: (status: ProxyStatus) 
     return existing
   }
   const rotator = new ProxyRotator({ id, target, onStatus })
+  // Keep discovering and re-validating proxies in the background for the whole
+  // process lifetime so provider requests almost always have a warm pool.
+  rotator.keepFresh()
   rotators.set(id, rotator)
   return rotator
 }
@@ -1906,7 +1909,7 @@ const layer = Layer.effect(
               )
               return { status: res.status, response: res }
             }
-            const { response: res } = await rotator.withRetry(perform)
+            const { response: res } = await rotator.withRetry(perform, opts.signal ?? undefined)
             if (!chunkAbortCtl) return res
             return wrapSSE(res, chunkTimeout, chunkAbortCtl)
           } finally {

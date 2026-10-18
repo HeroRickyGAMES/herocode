@@ -61,7 +61,7 @@ describe("provider.ProxyRotator.withRetry", () => {
     expect(status).toBe(200)
   })
 
-  test("throws the connection error after exhausting the proxy budget", async () => {
+  test("keeps rotating across proxies until the caller aborts", async () => {
     await using tmp = await tmpdir()
     let searches = 0
     const rotator = new ProxyRotator({
@@ -69,11 +69,42 @@ describe("provider.ProxyRotator.withRetry", () => {
       id: "with-retry",
       cacheDir: tmp.path,
       // A fresh search keeps finding the same dead proxy, so the rotator must
-      // resist stalling forever and surface only when the retry budget runs out.
+      // keep swapping (never stalling) until the caller cancels.
       search: async () => {
         searches++
         return [proxy(1)]
       },
+    })
+    const cache = [proxy(1)].map((url) => `${Date.now()}|${url}`).join("\n")
+    await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
+
+    const controller = new AbortController()
+    const error = new Error("Cannot connect to API: Unable to connect to the provider")
+    const seen: Array<string | undefined> = []
+    const send = async (p: string | undefined) => {
+      seen.push(p)
+      if (seen.length >= 6) controller.abort(new Error("cancelled"))
+      throw error
+    }
+
+    await expect(rotator.withRetry(send, controller.signal)).rejects.toThrow("cancelled")
+    // Direct attempt, then one per working proxy, well past any fixed budget.
+    expect(seen.length).toBeGreaterThanOrEqual(6)
+    expect(seen[0]).toBeUndefined()
+    expect(seen.slice(1).every((p) => p === proxy(1))).toBe(true)
+    // The pool dried up and was rejected/rescanned rather than silently reusing
+    // the same connection forever.
+    expect(searches).toBeGreaterThanOrEqual(1)
+  })
+
+  test("honors a finite attempt budget when one is provided", async () => {
+    await using tmp = await tmpdir()
+    const rotator = new ProxyRotator({
+      target: "https://opencode.ai",
+      id: "with-retry",
+      cacheDir: tmp.path,
+      maxAttempts: 4,
+      search: async () => [proxy(1)],
     })
     const cache = [proxy(1)].map((url) => `${Date.now()}|${url}`).join("\n")
     await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
@@ -86,13 +117,9 @@ describe("provider.ProxyRotator.withRetry", () => {
     }
 
     await expect(rotator.withRetry(send)).rejects.toBe(error)
-    // Direct attempt, then one per working proxy until the budget runs out.
-    expect(seen.length).toBe(10)
+    expect(seen.length).toBe(4)
     expect(seen[0]).toBeUndefined()
     expect(seen.slice(1).every((p) => p === proxy(1))).toBe(true)
-    // The pool dried up and was rejected/rescanned rather than silently reusing
-    // the same connection forever.
-    expect(searches).toBeGreaterThanOrEqual(1)
   })
 
   test("abandons a hung proxy once the request timeout fires and rotates", async () => {
@@ -132,6 +159,7 @@ describe("provider.ProxyRotator.withRetry", () => {
       target: "https://opencode.ai",
       id: "with-retry",
       cacheDir: tmp.path,
+      maxAttempts: 5,
       // Only the first search yields a working proxy; later rescans return the
       // same result. Proxy (1) is already used, so 404 forces rotation.
       search: async () => [proxy(1)],
@@ -149,7 +177,35 @@ describe("provider.ProxyRotator.withRetry", () => {
     // The request was retried after the cache pool was exhausted, proving that
     // exhaustion triggers a fresh rescan instead of giving up immediately.
     expect(status).toBe(404)
-    expect(seen.length).toBeGreaterThan(1)
+    expect(seen.length).toBe(5)
     expect(seen.every((p) => p === undefined || p === proxy(1))).toBe(true)
+  })
+
+  test("keepFresh keeps searching in the background while the pool is empty", async () => {
+    await using tmp = await tmpdir()
+    let searches = 0
+    const rotator = new ProxyRotator({
+      target: "https://opencode.ai",
+      id: "keep-fresh",
+      cacheDir: tmp.path,
+      refreshIntervalMs: 20,
+      // Empty results never get cached, so every background tick retries.
+      search: async () => {
+        searches++
+        return []
+      },
+    })
+    rotator.keepFresh()
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      if (searches >= 3) break
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    rotator.stop()
+    const after = searches
+    await new Promise((r) => setTimeout(r, 80))
+    // stop() must halt the loop.
+    expect(searches).toBe(after)
+    expect(after).toBeGreaterThanOrEqual(3)
   })
 })
