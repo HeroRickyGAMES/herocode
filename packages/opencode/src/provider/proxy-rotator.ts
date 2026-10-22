@@ -16,10 +16,11 @@ import path from "path"
 // - Proxies are applied with Bun's per-request `fetch(input, { proxy })`
 //   option, so nothing global is mutated and only the target request is routed.
 // - Proxies are validated by proxying a request to the provider host (e.g.
-//   `https://opencode.ai`). Any HTTP response except 407 proves the tunnel
-//   works; requiring 2xx rejected almost every usable proxy on API hosts. The
-//   validated pool is cached on disk, but a new process distrusts it until it
-//   has validated its own pool, since a previous run's cache is mostly dead.
+//   `https://opencode.ai`) and requiring a 2xx. Bun reports a rejected HTTPS
+//   CONNECT as a normal 400 response, so accepting 4xx lets fake proxies pass
+//   and turns every provider call into `Bad Request`. The validated pool is
+//   cached on disk, but a new process distrusts it until it has validated its
+//   own pool, since a previous run's cache is mostly dead.
 // - Rate limits rotate to another *working* proxy.
 // - Connection failures ("Cannot connect to API: Unable to connect ...")
 //   mean the current proxy is dead/unreachable, so that proxy is discarded and
@@ -761,12 +762,12 @@ async function testProxy(target: string, proxy: string, signal?: AbortSignal): P
   const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
   try {
     const response = await fetch(target, { proxy, signal: combined, redirect: "follow" })
-    // Any HTTP response proves the proxy tunnel reached the provider, even if
-    // the provider answers 401/404/429 for the bare origin. Requiring 2xx here
-    // rejected almost every usable proxy on API hosts that only answer on real
-    // endpoints. A 407 is the proxy itself demanding credentials, so it is the
-    // only status that means the proxy is unusable.
-    return response.status !== 407
+    // Require a 2xx from the provider itself. Bun surfaces a proxy that rejects
+    // the HTTPS CONNECT as a regular 400 response, so accepting any status made
+    // fake "proxies" (Cloudflare edge IPs, open ports) pass validation and every
+    // provider request then failed with `Bad Request`. A real tunnel to the
+    // provider origin answers 2xx; a broken one never does.
+    return response.ok
   } catch {
     return false
   } finally {
