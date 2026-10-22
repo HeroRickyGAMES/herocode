@@ -32,10 +32,12 @@ export const RETRY_MAX_RETRIES = 5
 // When the proxy rotator is active, re-try free-tier IP limits this often so a
 // fresh egress IP gets a chance instead of honoring the server's multi-hour
 // `retry-after` (Zen resets its daily free quota at midnight UTC).
-export const RETRY_PROXY_RESCAN_DELAY = 30_000
-// While the proxy rotator keeps finding proxies to rescan, don't give up after
-// the default 5 attempts; keep cycling until a working egress IP appears.
-export const RETRY_PROXY_MAX_RETRIES = 25
+export const RETRY_PROXY_RESCAN_DELAY = 15_000
+// A rotation hunt gets a small number of retries, but the wall-clock ceiling
+// below is the real bound: it stops a session from spending hours in a proxy
+// queue when every public proxy is dead.
+export const RETRY_PROXY_MAX_RETRIES = 8
+export const RETRY_PROXY_MAX_ELAPSED_MS = 3 * 60_000
 
 const RETRYABLE_MESSAGE_PATTERNS = [
   /429|500|502|503|504|524/i,
@@ -205,11 +207,18 @@ export function policy(opts: {
   /** Override the default 5-retry budget. Used to keep searching for a fresh
    * proxy while the proxy rotator is active. */
   maxRetries?: number
+  /**
+   * Hard wall-clock ceiling across all retries. Once reached the policy stops
+   * even if attempts remain, so a bad proxy pool cannot park a session for
+   * hours. Measured from the first retry, not policy creation.
+   */
+  maxElapsedMs?: number
 }) {
   if (opts.maxRetries !== undefined && opts.maxRetries < 1) {
     throw new Error("maxRetries must be >= 1")
   }
   const maxRetries = opts.maxRetries ?? RETRY_MAX_RETRIES
+  let startedAt: number | undefined
   return Schedule.fromStepWithMetadata(
     Effect.succeed((meta: Schedule.InputMetadata<unknown>) => {
       const error = opts.parse(meta.input)
@@ -217,9 +226,12 @@ export function policy(opts: {
       if (!retry) return Cause.done(meta.attempt)
       if (meta.attempt > maxRetries) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis
+        startedAt ??= now
+        if (opts.maxElapsedMs !== undefined && now - startedAt >= opts.maxElapsedMs)
+          return yield* Cause.done(meta.attempt)
         const wait = delay(meta.attempt, SessionV1.APIError.isInstance(error) ? error : undefined)
         const capped = freeTierDelay(wait, retry.action?.reason, opts.maxFreeLimitDelayMs)
-        const now = yield* Clock.currentTimeMillis
         yield* opts.set({
           attempt: meta.attempt,
           message: retry.message,

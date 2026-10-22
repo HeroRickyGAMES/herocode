@@ -1620,10 +1620,14 @@ export function Prompt(props: PromptProps) {
                         if (!r) return ""
                         const baseMessage = message()
                         const truncatedHint = isTruncated() ? " (click to expand)" : ""
-                        // Proxy rescans happen every ~30s and are expected to keep
-                        // hunting for a fresh egress IP; don't clutter the user with
-                        // countdown timing for these.
-                        if (r.action?.reason === "free_tier_limit") return `${baseMessage} (procurando outro proxy...)${truncatedHint}`
+                        // Proxy rescans are expected to keep hunting for a fresh
+                        // egress IP, but show attempt and countdown so it never
+                        // looks like an endless phone queue.
+                        if (r.action?.reason === "free_tier_limit") {
+                          const duration = formatDuration(seconds())
+                          const timing = duration ? `, nova tentativa em ${duration}` : ""
+                          return `${baseMessage} (procurando outro proxy... tentativa #${r.attempt}${timing})${truncatedHint}`
+                        }
                         const duration = formatDuration(seconds())
                         const retryInfo = ` [retrying ${duration ? `in ${duration} ` : ""}attempt #${r.attempt}]`
                         return baseMessage + truncatedHint + retryInfo

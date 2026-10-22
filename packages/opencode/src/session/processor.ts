@@ -695,6 +695,7 @@ const layer = Layer.effect(
                 },
                 maxFreeLimitDelayMs: rotatorActive ? SessionRetry.RETRY_PROXY_RESCAN_DELAY : undefined,
                 maxRetries: rotatorActive ? SessionRetry.RETRY_PROXY_MAX_RETRIES : undefined,
+                maxElapsedMs: rotatorActive ? SessionRetry.RETRY_PROXY_MAX_ELAPSED_MS : undefined,
               }),
             ),
             Effect.catch(halt),

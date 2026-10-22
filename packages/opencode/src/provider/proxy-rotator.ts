@@ -26,9 +26,13 @@ import path from "path"
 //   re-discovering and re-validating a fresh pool for the whole process
 //   lifetime, so a provider request almost always has a warm pool to rotate
 //   through even when most public proxies have died.
-// - Rotation is bounded per request. A request may try each proxy in the pool
-//   at most once, and gives up after `maxAttempts`; it never parks a session in
-//   an endless proxy search. The active proxy stays sticky across requests.
+// - Discovery prefers proxy lists that are already curated/sorted by "last
+//   checked" (Geonode, ProxyScrape) and validates concurrently with a short
+//   per-proxy timeout. A search stops as soon as enough working proxies are
+//   found, so it never spends minutes scanning dead lists.
+// - Rotation is bounded per request by both `maxAttempts` and a wall-clock
+//   `maxRotationMs` budget. A request may try each proxy in the pool at most
+//   once; the active proxy stays sticky across requests.
 //
 // This module is intentionally dependency-free (only global `fetch` and Node
 // builtins) so it stays simple and testable.
@@ -55,10 +59,18 @@ export interface ProxyRotatorOptions {
   /**
    * Per-attempt hard timeout in milliseconds. The rotator aborts a request that
    * has not produced a response (headers) within this window and treats it as a
-   * dead proxy, so a hung connection never parks the session. Defaults to 30s.
-   * Pass `false` to rely solely on the caller's own timeouts.
+   * dead proxy, so a hung connection never parks the session. Defaults to 45s
+   * for a direct connection and 20s for a proxy attempt. Pass `false` to rely
+   * solely on the caller's own timeouts.
    */
   readonly requestTimeoutMs?: number | false
+  /**
+   * Wall-clock ceiling for a single request's proxy rotation. Once exceeded the
+   * last response/error is surfaced to the caller instead of searching again.
+   * Defaults to 90s. Pass `false` for no wall-clock limit (attempt budget still
+   * applies).
+   */
+  readonly maxRotationMs?: number | false
   /** Override the cache directory (defaults to `~/.cache/opencode/proxies`). */
   readonly cacheDir?: string
   /** Extra proxy list URLs to fetch on top of the built-in sources. */
@@ -103,15 +115,19 @@ const CONNECTION_ERROR_PATTERNS = [
 ]
 
 // A proxy source is a URL plus an optional parser. Without a parser the body is
-// treated as one candidate (`host:port` or URL) per line.
+// treated as one candidate (`host:port` or URL) per line. `max` overrides the
+// per-source sample size; `max` of a huge list keeps the search cheap.
 interface ProxySource {
   readonly url: string
   readonly parse?: (body: string) => string[]
+  readonly max?: number
 }
 
 // Curated free HTTP proxy providers. GitHub raw lists plus public APIs that
 // expose plain-text or JSON endpoints; all are free and require no key. One
-// large list cannot crowd out the others (see MAX_PER_SOURCE).
+// large list cannot crowd out the others (see MAX_PER_SOURCE). APIs that sort
+// by `lastChecked`/uptime are preferred because they hand back proxies that
+// were alive minutes ago instead of ancient dead entries.
 const PROXY_SOURCES: readonly ProxySource[] = [
   { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt" },
   { url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt" },
@@ -135,29 +151,52 @@ const PROXY_SOURCES: readonly ProxySource[] = [
   { url: "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt" },
   { url: "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt" },
   { url: "https://openproxylist.xyz/http.txt" },
+  { url: "https://raw.githubusercontent.com/proxylist-to/proxy-list/main/http.txt" },
+  { url: "https://raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/HTTP.txt" },
+  { url: "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt" },
+  { url: "https://raw.githubusercontent.com/saisuiu/uiu/main/free.txt" },
+  { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt", max: 120 },
+  { url: "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt", max: 120 },
   { url: "https://spys.me/proxy.txt", parse: parseSpys },
   {
     url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http",
     parse: parseGeonode,
+    max: 160,
+  },
+  {
+    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=http",
+    parse: parseGeonode,
+    max: 160,
+  },
+  {
+    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=3&sort_by=lastChecked&sort_type=desc&protocols=http",
+    parse: parseGeonode,
+    max: 160,
   },
 ]
 
 // Finite by default: every proxy in a fresh pool gets one chance, then the
 // request fails so the session can surface the upstream error instead of
 // looping in proxy searches forever.
-const DEFAULT_MAX_ATTEMPTS = 10
+const DEFAULT_MAX_ATTEMPTS = 12
 const DEFAULT_REQUEST_TIMEOUT_MS = 45_000
-const VALIDATION_TIMEOUT_MS = 5_000
-const CACHE_TTL_MS = 5 * 60_000
+const PROXY_ATTEMPT_TIMEOUT_MS = 20_000
+const DEFAULT_MAX_ROTATION_MS = 90_000
+const VALIDATION_TIMEOUT_MS = 3_000
+const SEARCH_DEADLINE_MS = 18_000
+// Stop searching once this many proxies passed validation. A handful is enough
+// to rotate through while the background refresh replenishes the pool.
+const SEARCH_TARGET = 12
+const CACHE_TTL_MS = 2 * 60_000
 // Refresh the pool once the newest cached proxy is older than this.
-const REFRESH_AGE_MS = CACHE_TTL_MS / 2
-const DEFAULT_REFRESH_INTERVAL_MS = 3 * 60_000
+const REFRESH_AGE_MS = 45_000
+const DEFAULT_REFRESH_INTERVAL_MS = 60_000
 // Don't re-run an expensive proxy search more often than this.
-const SEARCH_MIN_INTERVAL_MS = 10_000
-const MAX_TESTED = 400
+const SEARCH_MIN_INTERVAL_MS = 5_000
+const MAX_TESTED = 5_000
 // Cap each source so a single huge list can't crowd out the rest of the pool.
-const MAX_PER_SOURCE = 60
-const TEST_CONCURRENCY = 60
+const MAX_PER_SOURCE = 100
+const TEST_CONCURRENCY = 120
 
 interface CachedProxy {
   readonly timestamp: number
@@ -170,6 +209,7 @@ export class ProxyRotator {
   private onStatus?: ProxyRotatorOptions["onStatus"]
   private readonly maxAttempts: number
   private readonly requestTimeoutMs: number | false
+  private readonly maxRotationMs: number | false
   private readonly cachePath: string
   private readonly extraSources: readonly string[]
   private readonly refreshIntervalMs: number | false
@@ -177,6 +217,7 @@ export class ProxyRotator {
 
   private activeProxy: string | undefined
   private lastSearchAt = 0
+  private searching?: Promise<void>
   private refreshTimer?: ReturnType<typeof setInterval>
 
   constructor(options: ProxyRotatorOptions) {
@@ -185,6 +226,7 @@ export class ProxyRotator {
     this.onStatus = options.onStatus
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
+    this.maxRotationMs = options.maxRotationMs ?? DEFAULT_MAX_ROTATION_MS
     this.cachePath = path.join(options.cacheDir ?? proxyCacheDir(), "working.txt")
     this.extraSources = options.extraSources ?? []
     this.refreshIntervalMs = options.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS
@@ -211,6 +253,9 @@ export class ProxyRotator {
    */
   keepFresh(): void {
     if (this.refreshTimer || this.refreshIntervalMs === false) return
+    // Warm the pool immediately so the first request does not have to wait for
+    // a full discovery pass.
+    void this.refresh().catch(() => {})
     this.refreshTimer = setInterval(() => {
       void this.refresh().catch(() => {})
     }, this.refreshIntervalMs)
@@ -246,14 +291,15 @@ export class ProxyRotator {
 
   /**
    * Execute `send(proxy)` and rotate across proxies until it succeeds, the
-   * attempt budget is exhausted, or the caller aborts. `send` is the actual
-   * provider request given the current proxy (or `undefined` for a direct
-   * connection); it returns the HTTP status and throws when the transport fails
-   * before a response is available.
+   * attempt budget or wall-clock budget is exhausted, or the caller aborts.
+   * `send` is the actual provider request given the current proxy (or
+   * `undefined` for a direct connection); it returns the HTTP status and throws
+   * when the transport fails before a response is available.
    *
    * Each request tracks the proxies it already tried. The active proxy remains
-   * sticky across requests, but one request never retries the same proxy, so a
-   * resumed session cannot loop between identical dead connections.
+   * sticky across requests, but one request never retries the same proxy and a
+   * single request can never spend more than `maxRotationMs` waiting for a
+   * replacement, so a resumed session cannot park for hours.
    */
   async withRetry(
     send: (proxy: string | undefined, signal?: AbortSignal) => Promise<{ status: number; response: Response }>,
@@ -262,11 +308,27 @@ export class ProxyRotator {
     status: number
     response: Response
   }> {
+    const deadline = this.maxRotationMs === false ? Infinity : Date.now() + this.maxRotationMs
     const used = new Set<string>()
     let proxy = this.activeProxy
+    let lastResult: { status: number; response: Response } | undefined
+    let lastError: unknown
+
     for (let attempt = 1; ; attempt++) {
       if (signal?.aborted) throw abortError(signal)
-      const timeout = this.requestTimeoutMs
+      if (attempt > 1 && Date.now() >= deadline) {
+        if (lastResult) return lastResult
+        throw lastError
+      }
+
+      const remaining = deadline - Date.now()
+      const baseTimeout =
+        this.requestTimeoutMs === false
+          ? false
+          : proxy
+            ? Math.min(this.requestTimeoutMs, PROXY_ATTEMPT_TIMEOUT_MS)
+            : this.requestTimeoutMs
+      const timeout = baseTimeout === false ? false : Math.max(1, Math.min(baseTimeout, remaining))
       const controller = timeout !== false && timeout > 0 ? new AbortController() : undefined
       const timer = controller && timeout !== false ? setTimeout(() => controller.abort(), timeout) : undefined
       let result
@@ -280,24 +342,25 @@ export class ProxyRotator {
         // this proxy (or a direct connection) is unusable — discard it and
         // restart the search from scratch.
         if (!ProxyRotator.isConnectionFailure(error)) throw error
+        lastError = error
         this.discard(proxy, used)
         if (attempt >= this.maxAttempts) throw error
-        proxy = await this.nextProxy(used, messageOf(error))
-        // No fresh proxy yet: wait out the search throttle and keep looking.
-        if (!proxy) await sleep(SEARCH_MIN_INTERVAL_MS, signal)
+        proxy = await this.nextProxy(used, messageOf(error), deadline)
+        if (!proxy) await waitForPool(deadline, signal)
         continue
       }
       clearTimeout(timer)
       // A successful response is returned untouched. Statuses that a different
       // egress IP cannot fix (auth errors, bad requests) surface immediately.
       if (!ProxyRotator.shouldRotate(result.status)) return result
+      lastResult = result
       if (attempt >= this.maxAttempts) return result
       // Never retry through the same (or no) connection: mark it used, rotate
       // to a fresh proxy, and if the pool is empty keep rescanning within the
-      // attempt budget.
+      // attempt/time budget.
       if (proxy) used.add(proxy)
-      proxy = await this.nextProxy(used)
-      if (!proxy) await sleep(SEARCH_MIN_INTERVAL_MS, signal)
+      proxy = await this.nextProxy(used, "rate limited", deadline)
+      if (!proxy) await waitForPool(deadline, signal)
     }
   }
 
@@ -307,8 +370,12 @@ export class ProxyRotator {
    * the rescan only returns already-tried proxies, return `undefined` so the
    * caller waits or gives up instead of hammering the same connection.
    */
-  private async nextProxy(used: Set<string>, reason = "no proxy available"): Promise<string | undefined> {
-    const pool = await this.workingPool()
+  private async nextProxy(
+    used: Set<string>,
+    reason = "no proxy available",
+    deadline = Infinity,
+  ): Promise<string | undefined> {
+    const pool = await this.workingPool(deadline)
     const candidate = pool.find((url) => !used.has(url))
     if (candidate) {
       used.add(candidate)
@@ -320,9 +387,10 @@ export class ProxyRotator {
     // Every proxy in the cached pool has already been tried (typically each one
     // returned 429/5xx). Never reuse a dead/rate limited proxy: rescan the
     // internet for a fresh batch and validate it against the target.
+    if (Date.now() >= deadline - 1_000) return undefined
     this.onStatus?.({ kind: "rescan", reason })
     await this.search()
-    const fresh = await this.workingPool()
+    const fresh = await this.workingPool(deadline)
     const next = fresh.find((url) => !used.has(url))
     if (!next) return undefined
     used.add(next)
@@ -339,13 +407,15 @@ export class ProxyRotator {
   }
 
   /** Return a validated pool of proxies, reusing the on-disk cache when fresh. */
-  private async workingPool(): Promise<readonly string[]> {
+  private async workingPool(deadline = Infinity): Promise<readonly string[]> {
     const cached = readCache(this.cachePath)
     if (cached.length > 0) {
       const fresh = cached.filter((entry) => Date.now() - entry.timestamp < CACHE_TTL_MS).map((entry) => entry.url)
       if (fresh.length > 0) return fresh
     }
-    // Don't hammer the proxy lists when the last search came up empty.
+    // Don't hammer the proxy lists when the last search came up empty, and
+    // don't start a slow search when this request is nearly out of time.
+    if (Date.now() >= deadline - 1_000) return []
     if (Date.now() - this.lastSearchAt < SEARCH_MIN_INTERVAL_MS) return []
     await this.search()
     return readCache(this.cachePath)
@@ -354,17 +424,32 @@ export class ProxyRotator {
   }
 
   /**
-   * Fetch fresh proxy lists and validate them against the target. The
+   * Fetch fresh proxy lists and validate them against the target. Concurrent
+   * callers share one in-flight search so the background refresh and a
+   * request-driven rescan never scan the internet twice at once. The
    * min-interval throttle guards request-driven searches; the background
    * refresh loop forces its own searches because it is already rate limited.
    */
   private async search(force = false): Promise<void> {
+    if (this.searching) return this.searching
     if (!force && Date.now() - this.lastSearchAt < SEARCH_MIN_INTERVAL_MS) return
-    const sources: ProxySource[] = [...PROXY_SOURCES, ...this.extraSources.map((url) => ({ url }))]
-    const working = this.searchOverride ? await this.searchOverride() : await defaultSearch(this.target, sources)
     this.lastSearchAt = Date.now()
-    if (working.length === 0) return
-    writeCache(this.cachePath, working)
+    const sources: ProxySource[] = [...PROXY_SOURCES, ...this.extraSources.map((url) => ({ url }))]
+    this.searching = (this.searchOverride
+      ? this.searchOverride()
+      : defaultSearch(this.target, sources)
+    )
+      .then((working) => {
+        if (working.length > 0) writeCache(this.cachePath, working)
+      })
+      .catch(() => {
+        // Discovery is best-effort; never let a source/parse failure abort a
+        // provider request.
+      })
+      .finally(() => {
+        this.searching = undefined
+      })
+    return this.searching
   }
 
   /** Re-validate the pool when the cache has gone stale. */
@@ -432,11 +517,11 @@ async function fetchCandidates(sources: readonly ProxySource[]): Promise<string[
   }
 
   const results = await Promise.allSettled(sources.map((source) => fetchSource(source)))
-  for (const result of results) {
+  for (const [index, result] of results.entries()) {
     if (result.status !== "fulfilled") continue
     // Cap and shuffle each source independently so an enormous list can't
     // dominate, and so repeated searches sample different proxies.
-    for (const line of shuffle(result.value).slice(0, MAX_PER_SOURCE)) add(line)
+    for (const line of shuffle(result.value).slice(0, sources[index]?.max ?? MAX_PER_SOURCE)) add(line)
   }
 
   // Cap the pool to keep validation fast.
@@ -465,36 +550,47 @@ function parseGeonode(body: string): string[] {
   if (typeof parsed !== "object" || parsed === null || !("data" in parsed)) return []
   const data = (parsed as { data?: unknown }).data
   if (!Array.isArray(data)) return []
-  return data.map((entry: unknown) => {
-    if (typeof entry !== "object" || entry === null) return ""
-    const { ip, port } = entry as { ip?: unknown; port?: unknown }
-    return typeof ip === "string" && (typeof port === "string" || typeof port === "number") ? `${ip}:${port}` : ""
+  return data.flatMap((entry: unknown) => {
+    if (typeof entry !== "object" || entry === null) return []
+    const { ip, port, upTime } = entry as { ip?: unknown; port?: unknown; upTime?: unknown }
+    if (typeof upTime === "number" && upTime < 20) return []
+    return typeof ip === "string" && (typeof port === "string" || typeof port === "number") ? [`${ip}:${port}`] : []
   })
 }
 
 async function testProxies(target: string, proxies: readonly string[]): Promise<string[]> {
   const working: string[] = []
   const queue = [...proxies]
+  const deadline = Date.now() + SEARCH_DEADLINE_MS
+  const controller = new AbortController()
   let cursor = 0
+  let done = false
 
   const worker = async (): Promise<void> => {
-    while (cursor < queue.length) {
-      const index = cursor++
-      const proxy = queue[index]
-      if (proxy && (await testProxy(target, proxy))) working.push(proxy)
+    while (!done && cursor < queue.length) {
+      if (Date.now() >= deadline) return
+      const proxy = queue[cursor++]
+      if (proxy && (await testProxy(target, proxy, controller.signal))) {
+        working.push(proxy)
+        if (working.length >= SEARCH_TARGET) {
+          done = true
+          controller.abort()
+        }
+      }
     }
   }
 
-  const workers = Array.from({ length: TEST_CONCURRENCY }, () => worker())
-  await Promise.all(workers)
+  await Promise.all(Array.from({ length: TEST_CONCURRENCY }, () => worker()))
+  controller.abort()
   return working
 }
 
-async function testProxy(target: string, proxy: string): Promise<boolean> {
+async function testProxy(target: string, proxy: string, signal?: AbortSignal): Promise<boolean> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), VALIDATION_TIMEOUT_MS)
+  const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
   try {
-    const response = await fetch(target, { proxy, signal: controller.signal, redirect: "follow" })
+    const response = await fetch(target, { proxy, signal: combined, redirect: "follow" })
     return response.ok
   } catch {
     return false
@@ -512,7 +608,7 @@ function toProxyUrl(value: string): string | undefined {
 
 async function fetchText(url: string): Promise<string> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 8_000)
+  const timer = setTimeout(() => controller.abort(), 5_000)
   try {
     const response = await fetch(url, { signal: controller.signal })
     if (!response.ok) return ""
@@ -536,6 +632,13 @@ function messageOf(error: unknown): string {
 
 function abortError(signal: AbortSignal | undefined): unknown {
   return signal?.reason ?? new DOMException("The operation was aborted.", "AbortError")
+}
+
+/** Wait out the search throttle without ever sleeping past the request deadline. */
+async function waitForPool(deadline: number, signal?: AbortSignal): Promise<void> {
+  const remaining = deadline - Date.now()
+  if (remaining <= 0) return
+  await sleep(Math.min(SEARCH_MIN_INTERVAL_MS, remaining), signal)
 }
 
 /** Abortable delay so a request waiting for a fresh pool still honors cancel. */

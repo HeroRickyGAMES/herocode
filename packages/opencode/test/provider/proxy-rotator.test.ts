@@ -225,6 +225,34 @@ describe("provider.ProxyRotator.withRetry", () => {
     expect(searches).toBe(1)
   })
 
+  test("gives up when the total rotation budget is exhausted", async () => {
+    await using tmp = await tmpdir()
+    const rotator = new ProxyRotator({
+      target: "https://opencode.ai",
+      id: "with-retry",
+      cacheDir: tmp.path,
+      maxAttempts: 100,
+      maxRotationMs: 120,
+      search: async () => [proxy(1), proxy(2), proxy(3), proxy(4), proxy(5)],
+    })
+    const cache = [proxy(1), proxy(2), proxy(3), proxy(4), proxy(5)]
+      .map((url) => `${Date.now()}|${url}`)
+      .join("\n")
+    await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
+
+    const seen: Array<string | undefined> = []
+    const send = async (p: string | undefined) => {
+      seen.push(p)
+      await Bun.sleep(30)
+      return { status: 503, response: new Response(null, { status: 503 }) }
+    }
+
+    const { status } = await rotator.withRetry(send)
+    expect(status).toBe(503)
+    expect(seen.length).toBeGreaterThanOrEqual(2)
+    expect(seen.length).toBeLessThan(10)
+  })
+
   test("keepFresh keeps searching in the background while the pool is empty", async () => {
     await using tmp = await tmpdir()
     let searches = 0
