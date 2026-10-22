@@ -26,6 +26,9 @@ import path from "path"
 //   re-discovering and re-validating a fresh pool for the whole process
 //   lifetime, so a provider request almost always has a warm pool to rotate
 //   through even when most public proxies have died.
+// - Rotation is bounded per request. A request may try each proxy in the pool
+//   at most once, and gives up after `maxAttempts`; it never parks a session in
+//   an endless proxy search. The active proxy stays sticky across requests.
 //
 // This module is intentionally dependency-free (only global `fetch` and Node
 // builtins) so it stays simple and testable.
@@ -45,8 +48,8 @@ export interface ProxyRotatorOptions {
   readonly onStatus?: (status: ProxyStatus) => void
   /**
    * Optional ceiling on how many times a single provider request may be retried
-   * across proxy switches. Defaults to unlimited: the request keeps swapping to
-   * a fresh proxy until it gets a usable response or the caller cancels.
+   * across proxy switches. Defaults to a finite budget so a request can never
+   * rotate forever when every proxy is dead or the upstream keeps failing.
    */
   readonly maxAttempts?: number
   /**
@@ -71,6 +74,11 @@ export interface ProxyRotatorOptions {
 }
 
 const RATE_LIMIT_STATUSES = new Set([429, 529])
+
+// Statuses a different egress IP can plausibly fix. Client errors such as 400,
+// 401 and 404 come from the provider and rotate forever without ever
+// succeeding, so they are surfaced to the caller instead of retried.
+const ROTATE_STATUSES = new Set([407, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 529])
 
 const CONNECTION_ERROR_PATTERNS = [
   /cannot connect to api/i,
@@ -134,9 +142,10 @@ const PROXY_SOURCES: readonly ProxySource[] = [
   },
 ]
 
-// Unlimited by default: a request keeps rotating through freshly discovered
-// proxies until one answers, or the caller aborts it.
-const DEFAULT_MAX_ATTEMPTS = Number.POSITIVE_INFINITY
+// Finite by default: every proxy in a fresh pool gets one chance, then the
+// request fails so the session can surface the upstream error instead of
+// looping in proxy searches forever.
+const DEFAULT_MAX_ATTEMPTS = 10
 const DEFAULT_REQUEST_TIMEOUT_MS = 45_000
 const VALIDATION_TIMEOUT_MS = 5_000
 const CACHE_TTL_MS = 5 * 60_000
@@ -167,7 +176,6 @@ export class ProxyRotator {
   private readonly searchOverride?: () => Promise<string[]>
 
   private activeProxy: string | undefined
-  private readonly used = new Set<string>()
   private lastSearchAt = 0
   private refreshTimer?: ReturnType<typeof setInterval>
 
@@ -221,13 +229,13 @@ export class ProxyRotator {
   }
 
   /**
-   * True when a response status means the proxy should be rotated. Any 4xx/5xx
-   * is treated as a proxy/upstream problem worth a fresh connection instead of
-   * surfacing straight to the caller — that includes 404s served by a shared
-   * gateway, 5xx, and auth/forbidden blocks that a different egress IP dodges.
+   * True when a response status means the proxy should be rotated. Only
+   * statuses a fresh egress IP can fix qualify: proxy auth/timeout, rate
+   * limits, upstream 5xx and Cloudflare edge errors. Provider-side client
+   * errors (400, 401, 403, 404) are returned to the caller immediately.
    */
   static shouldRotate(status: number): boolean {
-    return status >= 400
+    return ROTATE_STATUSES.has(status)
   }
 
   /** True when a thrown error means the proxy cannot reach the target at all. */
@@ -237,16 +245,15 @@ export class ProxyRotator {
   }
 
   /**
-   * Execute `send(proxy)` and keep rotating across proxies until it succeeds,
-   * the optional attempt budget is exhausted, or the caller aborts. `send` is
-   * the actual provider request given the current proxy (or `undefined` for a
-   * direct connection); it returns the HTTP status and throws when the transport
-   * fails before a response is available.
+   * Execute `send(proxy)` and rotate across proxies until it succeeds, the
+   * attempt budget is exhausted, or the caller aborts. `send` is the actual
+   * provider request given the current proxy (or `undefined` for a direct
+   * connection); it returns the HTTP status and throws when the transport fails
+   * before a response is available.
    *
-   * With the default unlimited budget a rate limited or unreachable request
-   * keeps swapping proxies until a response arrives, so it can keep working
-   * instead of surfacing a failure. Pass `signal` so a user cancellation stops
-   * the loop instead of rotating forever.
+   * Each request tracks the proxies it already tried. The active proxy remains
+   * sticky across requests, but one request never retries the same proxy, so a
+   * resumed session cannot loop between identical dead connections.
    */
   async withRetry(
     send: (proxy: string | undefined, signal?: AbortSignal) => Promise<{ status: number; response: Response }>,
@@ -255,6 +262,7 @@ export class ProxyRotator {
     status: number
     response: Response
   }> {
+    const used = new Set<string>()
     let proxy = this.activeProxy
     for (let attempt = 1; ; attempt++) {
       if (signal?.aborted) throw abortError(signal)
@@ -272,36 +280,38 @@ export class ProxyRotator {
         // this proxy (or a direct connection) is unusable — discard it and
         // restart the search from scratch.
         if (!ProxyRotator.isConnectionFailure(error)) throw error
-        this.discard(proxy)
+        this.discard(proxy, used)
         if (attempt >= this.maxAttempts) throw error
-        proxy = await this.nextProxy(messageOf(error))
+        proxy = await this.nextProxy(used, messageOf(error))
         // No fresh proxy yet: wait out the search throttle and keep looking.
         if (!proxy) await sleep(SEARCH_MIN_INTERVAL_MS, signal)
         continue
       }
       clearTimeout(timer)
-      // Any non-2xx status is grounds for rotating to a fresh connection; a
-      // working response is returned untouched.
+      // A successful response is returned untouched. Statuses that a different
+      // egress IP cannot fix (auth errors, bad requests) surface immediately.
       if (!ProxyRotator.shouldRotate(result.status)) return result
       if (attempt >= this.maxAttempts) return result
-      // A problem status must never retry through the same (or no) connection:
-      // rotate to a fresh proxy, and if the pool is empty keep rescanning.
-      proxy = await this.nextProxy()
+      // Never retry through the same (or no) connection: mark it used, rotate
+      // to a fresh proxy, and if the pool is empty keep rescanning within the
+      // attempt budget.
+      if (proxy) used.add(proxy)
+      proxy = await this.nextProxy(used)
       if (!proxy) await sleep(SEARCH_MIN_INTERVAL_MS, signal)
     }
   }
 
   /**
-   * Pick the next unused proxy from the working pool. When the pool has no
-   * candidate left (stale cache or an earlier empty search), force a fresh
-   * list + validation pass before giving up so a rate limited request stands a
-   * real chance of finding a new egress IP instead of parking the session.
+   * Pick the next proxy from the working pool that this request has not tried
+   * yet. When the pool is exhausted, force a fresh list + validation pass. If
+   * the rescan only returns already-tried proxies, return `undefined` so the
+   * caller waits or gives up instead of hammering the same connection.
    */
-  private async nextProxy(reason = "no proxy available"): Promise<string | undefined> {
+  private async nextProxy(used: Set<string>, reason = "no proxy available"): Promise<string | undefined> {
     const pool = await this.workingPool()
-    const candidate = pool.find((url) => !this.used.has(url))
+    const candidate = pool.find((url) => !used.has(url))
     if (candidate) {
-      this.used.add(candidate)
+      used.add(candidate)
       this.activeProxy = candidate
       this.onStatus?.({ kind: "switch", proxy: candidate })
       return candidate
@@ -309,22 +319,21 @@ export class ProxyRotator {
 
     // Every proxy in the cached pool has already been tried (typically each one
     // returned 429/5xx). Never reuse a dead/rate limited proxy: rescan the
-    // internet for a fresh batch and validate it against the target before
-    // falling back to a recycled proxy.
+    // internet for a fresh batch and validate it against the target.
     this.onStatus?.({ kind: "rescan", reason })
     await this.search()
     const fresh = await this.workingPool()
-    const next = fresh.find((url) => !this.used.has(url)) ?? fresh[0]
+    const next = fresh.find((url) => !used.has(url))
     if (!next) return undefined
-    this.used.add(next)
+    used.add(next)
     this.activeProxy = next
     this.onStatus?.({ kind: "switch", proxy: next })
     return next
   }
 
-  private discard(proxy: string | undefined): void {
+  private discard(proxy: string | undefined, used: Set<string>): void {
     if (!proxy) return
-    this.used.add(proxy)
+    used.add(proxy)
     if (this.activeProxy === proxy) this.activeProxy = undefined
     this.onStatus?.({ kind: "discard", proxy, reason: "could not connect through this proxy" })
   }
