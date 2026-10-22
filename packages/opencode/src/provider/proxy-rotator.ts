@@ -15,9 +15,11 @@ import path from "path"
 // Design notes:
 // - Proxies are applied with Bun's per-request `fetch(input, { proxy })`
 //   option, so nothing global is mutated and only the target request is routed.
-// - Proxies are validated by proxying a lightweight request to the provider
-//   host (e.g. `https://opencode.ai`). The validated pool is cached on disk and
-//   reused for a short TTL, mirroring `ipswap`.
+// - Proxies are validated by proxying a request to the provider host (e.g.
+//   `https://opencode.ai`). Any HTTP response except 407 proves the tunnel
+//   works; requiring 2xx rejected almost every usable proxy on API hosts. The
+//   validated pool is cached on disk, but a new process distrusts it until it
+//   has validated its own pool, since a previous run's cache is mostly dead.
 // - Rate limits rotate to another *working* proxy.
 // - Connection failures ("Cannot connect to API: Unable to connect ...")
 //   mean the current proxy is dead/unreachable, so that proxy is discarded and
@@ -26,10 +28,11 @@ import path from "path"
 //   re-discovering and re-validating a fresh pool for the whole process
 //   lifetime, so a provider request almost always has a warm pool to rotate
 //   through even when most public proxies have died.
-// - Discovery prefers proxy lists that are already curated/sorted by "last
-//   checked" (Geonode, ProxyScrape) and validates concurrently with a short
-//   per-proxy timeout. A search stops as soon as enough working proxies are
-//   found, so it never spends minutes scanning dead lists.
+// - Discovery prefers sources that report liveness (`alive`, `last_seen`,
+//   `upTime`) and keeps their freshest entries at the front of the validation
+//   queue, then validates concurrently with a short per-proxy timeout. A search
+//   stops as soon as enough working proxies are found, so it never spends
+//   minutes scanning dead lists.
 // - Rotation is bounded per request by both `maxAttempts` and a wall-clock
 //   `maxRotationMs` budget. A request may try each proxy in the pool at most
 //   once; the active proxy stays sticky across requests.
@@ -117,10 +120,13 @@ const CONNECTION_ERROR_PATTERNS = [
 // A proxy source is a URL plus an optional parser. Without a parser the body is
 // treated as one candidate (`host:port` or URL) per line. `max` overrides the
 // per-source sample size; `max` of a huge list keeps the search cheap.
+// `ordered` sources are already sorted from freshest/best to oldest, so their
+// first entries are validated before any shuffled entry.
 interface ProxySource {
   readonly url: string
   readonly parse?: (body: string) => string[]
   readonly max?: number
+  readonly ordered?: boolean
 }
 
 // Curated free HTTP proxy providers. GitHub raw lists plus public APIs that
@@ -160,24 +166,45 @@ const PROXY_SOURCES: readonly ProxySource[] = [
   { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt", max: 120 },
   { url: "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt", max: 120 },
   { url: "https://spys.me/proxy.txt", parse: parseSpys },
+  // ProxyScrape's JSON endpoint reports `alive`, `last_seen`, `uptime` and
+  // `ssl`. Keeping only live CONNECT-capable proxies removes most of the dead
+  // entries a plain `ip:port` list still carries.
   {
-    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http",
+    url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=json&timeout=5000&ssl=yes",
+    parse: parseProxyScrape,
+    ordered: true,
+    max: 300,
+  },
+  {
+    url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=json&timeout=5000",
+    parse: parseProxyScrape,
+    ordered: true,
+    max: 300,
+  },
+  // Geonode sorts by last check / uptime and exposes uptime and latency. Sort
+  // by uptime so proxies that kept answering recently are validated first.
+  {
+    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=upTime&sort_type=desc&protocols=http",
     parse: parseGeonode,
+    ordered: true,
     max: 240,
   },
   {
-    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=http",
+    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=upTime&sort_type=desc&protocols=http",
     parse: parseGeonode,
+    ordered: true,
     max: 240,
   },
   {
-    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=3&sort_by=lastChecked&sort_type=desc&protocols=http",
+    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=3&sort_by=upTime&sort_type=desc&protocols=http",
     parse: parseGeonode,
+    ordered: true,
     max: 240,
   },
   {
-    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=4&sort_by=lastChecked&sort_type=desc&protocols=http",
+    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=4&sort_by=upTime&sort_type=desc&protocols=http",
     parse: parseGeonode,
+    ordered: true,
     max: 240,
   },
 ]
@@ -196,16 +223,18 @@ const VALIDATION_TIMEOUT_MS = 2_500
 const SEARCH_DEADLINE_MS = 25_000
 // Stop searching once this many proxies passed validation. A larger pool is
 // important because free proxies die constantly and many are already burned.
-const SEARCH_TARGET = 24
-const CACHE_TTL_MS = 90_000
+const SEARCH_TARGET = 32
+// A cached proxy is trusted for at most two minutes. Free proxies die fast, so
+// a longer TTL mostly serves corpses.
+const CACHE_TTL_MS = 120_000
 // Refresh the pool once the newest cached proxy is older than this.
-const REFRESH_AGE_MS = 30_000
-const DEFAULT_REFRESH_INTERVAL_MS = 45_000
+const REFRESH_AGE_MS = 45_000
+const DEFAULT_REFRESH_INTERVAL_MS = 40_000
 // Don't re-run an expensive proxy search more often than this.
 const SEARCH_MIN_INTERVAL_MS = 4_000
 const MAX_TESTED = 6_000
 // Cap each source so a single huge list can't crowd out the rest of the pool.
-const MAX_PER_SOURCE = 150
+const MAX_PER_SOURCE = 200
 const TEST_CONCURRENCY = 200
 
 interface CachedProxy {
@@ -229,6 +258,10 @@ export class ProxyRotator {
   private lastSearchAt = 0
   private searching?: Promise<void>
   private refreshTimer?: ReturnType<typeof setInterval>
+  // Cache entries written before this process started were validated by a
+  // previous run and are usually dead. Never serve them until this process has
+  // validated its own pool.
+  private readonly startedAt = Date.now()
   // Proxies that recently failed are parked so later requests do not start
   // their rotation with the same dead/burned connections.
   private readonly blockedUntil = new Map<string, number>()
@@ -455,16 +488,27 @@ export class ProxyRotator {
   /** Return a validated pool of proxies, reusing the on-disk cache when fresh. */
   private async workingPool(deadline = Infinity): Promise<readonly string[]> {
     const cached = readCache(this.cachePath)
-    const newest = newestTimestamp(cached)
-    if (cached.length > 0 && Date.now() - newest < CACHE_TTL_MS) {
-      // If this process is doing its startup/periodic revalidation, wait for
-      // it instead of handing the request proxies that may have just died.
-      if (this.searching && Date.now() - newest >= REFRESH_AGE_MS && Date.now() < deadline - 1_000) {
-        await this.searching
-        return this.readPool()
+    // Only entries validated by *this* process count. A fresh terminal must not
+    // start its first rotation with proxies another process found minutes ago.
+    const fresh = cached.some((entry) => entry.timestamp >= this.startedAt)
+    if (fresh) {
+      const pool = this.readPool()
+      if (pool.length > 0) {
+        // If this process is revalidating, wait for it instead of handing the
+        // request proxies that may have just died.
+        if (this.searching && Date.now() - newestTimestamp(cached) >= REFRESH_AGE_MS) {
+          await this.awaitSearch(deadline)
+          return this.readPool()
+        }
+        return pool
       }
-      const fresh = this.readPool()
-      if (fresh.length > 0) return fresh
+    }
+    // A startup/periodic search is already running: wait for its result rather
+    // than starting another scan or returning an empty pool.
+    if (this.searching) {
+      await this.awaitSearch(deadline)
+      const pool = this.readPool()
+      if (pool.length > 0) return pool
     }
     // Don't hammer the proxy lists when the last search came up empty, and
     // don't start a slow search when this request is nearly out of time.
@@ -474,9 +518,21 @@ export class ProxyRotator {
     return this.readPool()
   }
 
+  /** Wait for an in-flight search without ever sleeping past the deadline. */
+  private async awaitSearch(deadline: number): Promise<void> {
+    if (!this.searching) return
+    if (!Number.isFinite(deadline)) {
+      await this.searching
+      return
+    }
+    const remaining = deadline - Date.now() - 1_000
+    if (remaining <= 0) return
+    await Promise.race([this.searching, sleep(remaining)])
+  }
+
   private readPool(): readonly string[] {
     return readCache(this.cachePath)
-      .filter((entry) => Date.now() - entry.timestamp < CACHE_TTL_MS)
+      .filter((entry) => entry.timestamp >= this.startedAt && Date.now() - entry.timestamp < CACHE_TTL_MS)
       .map((entry) => entry.url)
       .filter((url) => !this.isBlocked(url))
   }
@@ -572,30 +628,38 @@ function writeCacheEntries(file: string, entries: readonly CachedProxy[]): void 
 }
 
 async function fetchCandidates(sources: readonly ProxySource[]): Promise<string[]> {
-  const lines: string[] = []
+  const ordered: string[] = []
+  const rest: string[] = []
   const seen = new Set<string>()
 
-  const add = (line: string): void => {
+  const add = (target: string[], line: string): void => {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith("#")) return
     const url = toProxyUrl(trimmed)
     if (url && !seen.has(url)) {
       seen.add(url)
-      lines.push(url)
+      target.push(url)
     }
   }
 
   const results = await Promise.allSettled(sources.map((source) => fetchSource(source)))
   for (const [index, result] of results.entries()) {
     if (result.status !== "fulfilled") continue
-    // Cap and shuffle each source independently so an enormous list can't
-    // dominate, and so repeated searches sample different proxies.
-    for (const line of shuffle(result.value).slice(0, sources[index]?.max ?? MAX_PER_SOURCE)) add(line)
+    const source = sources[index]
+    const max = source?.max ?? MAX_PER_SOURCE
+    // Sources that already report liveness (`alive`, `last_seen`, `upTime`) are
+    // kept in their own order so the freshest entries get validated first.
+    // Plain lists are shuffled to sample different entries across searches.
+    if (source?.ordered) {
+      for (const line of result.value.slice(0, max)) add(ordered, line)
+      continue
+    }
+    for (const line of shuffle(result.value).slice(0, max)) add(rest, line)
   }
 
-  // Cap the pool to keep validation fast.
-  shuffle(lines)
-  return lines.slice(0, MAX_TESTED)
+  // Validate the freshest known proxies first, then fill the remaining budget
+  // with the shuffled long tail.
+  return [...ordered, ...shuffle(rest)].slice(0, MAX_TESTED)
 }
 
 async function fetchSource(source: ProxySource): Promise<string[]> {
@@ -619,12 +683,49 @@ function parseGeonode(body: string): string[] {
   if (typeof parsed !== "object" || parsed === null || !("data" in parsed)) return []
   const data = (parsed as { data?: unknown }).data
   if (!Array.isArray(data)) return []
-  return data.flatMap((entry: unknown) => {
-    if (typeof entry !== "object" || entry === null) return []
-    const { ip, port, upTime } = entry as { ip?: unknown; port?: unknown; upTime?: unknown }
-    if (typeof upTime === "number" && upTime < 20) return []
-    return typeof ip === "string" && (typeof port === "string" || typeof port === "number") ? [`${ip}:${port}`] : []
-  })
+  return data
+    .flatMap((entry: unknown) => {
+      if (typeof entry !== "object" || entry === null) return []
+      const { ip, port, upTime } = entry as { ip?: unknown; port?: unknown; upTime?: unknown }
+      if (typeof upTime === "number" && upTime < 20) return []
+      return typeof ip === "string" && (typeof port === "string" || typeof port === "number")
+        ? [{ url: `${ip}:${port}`, upTime: typeof upTime === "number" ? upTime : 0 }]
+        : []
+    })
+    .sort((a, b) => b.upTime - a.upTime)
+    .map((entry) => entry.url)
+}
+
+function parseProxyScrape(body: string): string[] {
+  const parsed: unknown = JSON.parse(body)
+  if (typeof parsed !== "object" || parsed === null || !("proxies" in parsed)) return []
+  const proxies = (parsed as { proxies?: unknown }).proxies
+  if (!Array.isArray(proxies)) return []
+  return proxies
+    .flatMap((entry: unknown) => {
+      if (typeof entry !== "object" || entry === null) return []
+      const { ip, port, alive, last_seen, uptime } = entry as {
+        ip?: unknown
+        port?: unknown
+        alive?: unknown
+        last_seen?: unknown
+        uptime?: unknown
+      }
+      // `alive` is the provider's own online flag. Reject proxies it already
+      // knows are down instead of spending a validation slot on them.
+      if (alive === false) return []
+      if (typeof ip !== "string" || (typeof port !== "string" && typeof port !== "number")) return []
+      return [
+        {
+          url: `${ip}:${port}`,
+          lastSeen: typeof last_seen === "number" ? last_seen : 0,
+          uptime: typeof uptime === "number" ? uptime : 0,
+        },
+      ]
+    })
+    // Freshest-reported and most reliable proxies first.
+    .sort((a, b) => b.lastSeen - a.lastSeen || b.uptime - a.uptime)
+    .map((entry) => entry.url)
 }
 
 async function testProxies(target: string, proxies: readonly string[]): Promise<string[]> {
@@ -660,7 +761,12 @@ async function testProxy(target: string, proxy: string, signal?: AbortSignal): P
   const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
   try {
     const response = await fetch(target, { proxy, signal: combined, redirect: "follow" })
-    return response.ok
+    // Any HTTP response proves the proxy tunnel reached the provider, even if
+    // the provider answers 401/404/429 for the bare origin. Requiring 2xx here
+    // rejected almost every usable proxy on API hosts that only answer on real
+    // endpoints. A 407 is the proxy itself demanding credentials, so it is the
+    // only status that means the proxy is unusable.
+    return response.status !== 407
   } catch {
     return false
   } finally {
