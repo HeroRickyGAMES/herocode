@@ -32,12 +32,12 @@ export const RETRY_MAX_RETRIES = 5
 // When the proxy rotator is active, re-try free-tier IP limits this often so a
 // fresh egress IP gets a chance instead of honoring the server's multi-hour
 // `retry-after` (Zen resets its daily free quota at midnight UTC).
-export const RETRY_PROXY_RESCAN_DELAY = 15_000
-// A rotation hunt gets a small number of retries, but the wall-clock ceiling
-// below is the real bound: it stops a session from spending hours in a proxy
-// queue when every public proxy is dead.
-export const RETRY_PROXY_MAX_RETRIES = 8
-export const RETRY_PROXY_MAX_ELAPSED_MS = 3 * 60_000
+export const RETRY_PROXY_RESCAN_DELAY = 10_000
+// The wall-clock ceiling is the real bound. It is deliberately longer than a
+// single request so the session keeps hunting through a bad public pool, but
+// still finite so it can never sit for hours in a proxy queue.
+export const RETRY_PROXY_MAX_RETRIES = 30
+export const RETRY_PROXY_MAX_ELAPSED_MS = 10 * 60_000
 
 const RETRYABLE_MESSAGE_PATTERNS = [
   /429|500|502|503|504|524/i,
@@ -232,9 +232,12 @@ export function policy(opts: {
           return yield* Cause.done(meta.attempt)
         const wait = delay(meta.attempt, SessionV1.APIError.isInstance(error) ? error : undefined)
         const capped = freeTierDelay(wait, retry.action?.reason, opts.maxFreeLimitDelayMs)
+        // While a proxy rotation is actively hunting, do not nag the user to
+        // subscribe; the session is still working on a fresh egress IP.
+        const rotating = opts.maxFreeLimitDelayMs !== undefined && retry.action?.reason === "free_tier_limit"
         yield* opts.set({
           attempt: meta.attempt,
-          message: retry.message,
+          message: rotating ? "Free usage limit reached, rotating proxies" : retry.message,
           action: retry.action,
           next: now + capped,
         })

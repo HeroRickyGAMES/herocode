@@ -133,26 +133,29 @@ describe("provider.ProxyRotator.withRetry", () => {
     expect(seen).toStrictEqual([undefined, proxy(1)])
   })
 
-  test("does not exhaust the shared pool across requests", async () => {
+  test("replaces a dead proxy with a fresh one on a later request", async () => {
     await using tmp = await tmpdir()
     const rotator = new ProxyRotator({
       target: "https://opencode.ai",
       id: "with-retry",
       cacheDir: tmp.path,
       maxAttempts: 2,
-      search: async () => [proxy(1)],
+      search: async () => [proxy(2)],
     })
     const cache = [proxy(1)].map((url) => `${Date.now()}|${url}`).join("\n")
     await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
 
     const error = new Error("Cannot connect to API: Unable to connect to the provider")
-    const failSend = async () => {
+    const firstSeen: Array<string | undefined> = []
+    const failSend = async (p: string | undefined) => {
+      firstSeen.push(p)
       throw error
     }
     await expect(rotator.withRetry(failSend)).rejects.toBe(error)
+    expect(firstSeen).toStrictEqual([undefined, proxy(1)])
 
-    // A later request must be able to use proxy (1) again even though an
-    // earlier request already burned through the whole pool.
+    // The dead proxy is now parked, so a later request must not start by
+    // retrying it; it should use a freshly discovered proxy instead.
     const seen: Array<string | undefined> = []
     const send = async (p: string | undefined) => {
       seen.push(p)
@@ -161,7 +164,7 @@ describe("provider.ProxyRotator.withRetry", () => {
     }
     const { status } = await rotator.withRetry(send)
     expect(status).toBe(200)
-    expect(seen).toStrictEqual([undefined, proxy(1)])
+    expect(seen).toStrictEqual([undefined, proxy(2)])
   })
 
   test("abandons a hung proxy once the request timeout fires and rotates", async () => {

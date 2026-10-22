@@ -131,6 +131,7 @@ interface ProxySource {
 const PROXY_SOURCES: readonly ProxySource[] = [
   { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt" },
   { url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt" },
+  { url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt", max: 160 },
   {
     url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text",
   },
@@ -145,6 +146,7 @@ const PROXY_SOURCES: readonly ProxySource[] = [
   { url: "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt" },
   { url: "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt" },
   { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt" },
+  { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt" },
   { url: "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt" },
   { url: "https://raw.githubusercontent.com/themiralay/Proxy-List-World/master/data.txt" },
   { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt" },
@@ -161,42 +163,50 @@ const PROXY_SOURCES: readonly ProxySource[] = [
   {
     url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http",
     parse: parseGeonode,
-    max: 160,
+    max: 240,
   },
   {
     url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=http",
     parse: parseGeonode,
-    max: 160,
+    max: 240,
   },
   {
     url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=3&sort_by=lastChecked&sort_type=desc&protocols=http",
     parse: parseGeonode,
-    max: 160,
+    max: 240,
+  },
+  {
+    url: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=4&sort_by=lastChecked&sort_type=desc&protocols=http",
+    parse: parseGeonode,
+    max: 240,
   },
 ]
 
-// Finite by default: every proxy in a fresh pool gets one chance, then the
-// request fails so the session can surface the upstream error instead of
-// looping in proxy searches forever.
-const DEFAULT_MAX_ATTEMPTS = 12
+// Finite by default: a request may try many proxies, but the wall-clock budget
+// is the real bound so a session cannot loop for hours.
+const DEFAULT_MAX_ATTEMPTS = 30
 const DEFAULT_REQUEST_TIMEOUT_MS = 45_000
-const PROXY_ATTEMPT_TIMEOUT_MS = 20_000
+const PROXY_ATTEMPT_TIMEOUT_MS = 15_000
 const DEFAULT_MAX_ROTATION_MS = 90_000
-const VALIDATION_TIMEOUT_MS = 3_000
-const SEARCH_DEADLINE_MS = 18_000
-// Stop searching once this many proxies passed validation. A handful is enough
-// to rotate through while the background refresh replenishes the pool.
-const SEARCH_TARGET = 12
-const CACHE_TTL_MS = 2 * 60_000
+// Dead connections are blacklisted for a while so later requests never start
+// by retrying the same corpse. Rate-limited IPs are parked a bit shorter.
+const CONNECTION_BLOCK_MS = 10 * 60_000
+const RATE_LIMIT_BLOCK_MS = 5 * 60_000
+const VALIDATION_TIMEOUT_MS = 2_500
+const SEARCH_DEADLINE_MS = 25_000
+// Stop searching once this many proxies passed validation. A larger pool is
+// important because free proxies die constantly and many are already burned.
+const SEARCH_TARGET = 24
+const CACHE_TTL_MS = 90_000
 // Refresh the pool once the newest cached proxy is older than this.
-const REFRESH_AGE_MS = 45_000
-const DEFAULT_REFRESH_INTERVAL_MS = 60_000
+const REFRESH_AGE_MS = 30_000
+const DEFAULT_REFRESH_INTERVAL_MS = 45_000
 // Don't re-run an expensive proxy search more often than this.
-const SEARCH_MIN_INTERVAL_MS = 5_000
-const MAX_TESTED = 5_000
+const SEARCH_MIN_INTERVAL_MS = 4_000
+const MAX_TESTED = 6_000
 // Cap each source so a single huge list can't crowd out the rest of the pool.
-const MAX_PER_SOURCE = 100
-const TEST_CONCURRENCY = 120
+const MAX_PER_SOURCE = 150
+const TEST_CONCURRENCY = 200
 
 interface CachedProxy {
   readonly timestamp: number
@@ -219,6 +229,9 @@ export class ProxyRotator {
   private lastSearchAt = 0
   private searching?: Promise<void>
   private refreshTimer?: ReturnType<typeof setInterval>
+  // Proxies that recently failed are parked so later requests do not start
+  // their rotation with the same dead/burned connections.
+  private readonly blockedUntil = new Map<string, number>()
 
   constructor(options: ProxyRotatorOptions) {
     this.target = options.target.replace(/\/$/, "")
@@ -253,9 +266,10 @@ export class ProxyRotator {
    */
   keepFresh(): void {
     if (this.refreshTimer || this.refreshIntervalMs === false) return
-    // Warm the pool immediately so the first request does not have to wait for
-    // a full discovery pass.
-    void this.refresh().catch(() => {})
+    // Rebuild the pool immediately. A cache from a previous run can be full of
+    // proxies that were alive minutes ago and are dead now, so the first
+    // request must not trust it.
+    void this.search(true)
     this.refreshTimer = setInterval(() => {
       void this.refresh().catch(() => {})
     }, this.refreshIntervalMs)
@@ -311,6 +325,10 @@ export class ProxyRotator {
     const deadline = this.maxRotationMs === false ? Infinity : Date.now() + this.maxRotationMs
     const used = new Set<string>()
     let proxy = this.activeProxy
+    if (proxy && this.isBlocked(proxy)) {
+      this.activeProxy = undefined
+      proxy = undefined
+    }
     let lastResult: { status: number; response: Response } | undefined
     let lastError: unknown
 
@@ -355,10 +373,10 @@ export class ProxyRotator {
       if (!ProxyRotator.shouldRotate(result.status)) return result
       lastResult = result
       if (attempt >= this.maxAttempts) return result
-      // Never retry through the same (or no) connection: mark it used, rotate
-      // to a fresh proxy, and if the pool is empty keep rescanning within the
-      // attempt/time budget.
-      if (proxy) used.add(proxy)
+      // Never retry through the same (or no) connection: mark it used, park it
+      // for a while (its IP is burned), rotate to a fresh proxy, and if the
+      // pool is empty keep rescanning within the attempt/time budget.
+      if (proxy) this.burn(proxy, used)
       proxy = await this.nextProxy(used, "rate limited", deadline)
       if (!proxy) await waitForPool(deadline, signal)
     }
@@ -402,15 +420,50 @@ export class ProxyRotator {
   private discard(proxy: string | undefined, used: Set<string>): void {
     if (!proxy) return
     used.add(proxy)
+    this.block(proxy, CONNECTION_BLOCK_MS)
+    this.removeFromCache(proxy)
     if (this.activeProxy === proxy) this.activeProxy = undefined
     this.onStatus?.({ kind: "discard", proxy, reason: "could not connect through this proxy" })
+  }
+
+  private burn(proxy: string, used: Set<string>): void {
+    used.add(proxy)
+    this.block(proxy, RATE_LIMIT_BLOCK_MS)
+    this.removeFromCache(proxy)
+    if (this.activeProxy === proxy) this.activeProxy = undefined
+  }
+
+  private block(proxy: string, ms: number): void {
+    this.blockedUntil.set(proxy, Date.now() + ms)
+  }
+
+  private isBlocked(proxy: string): boolean {
+    const until = this.blockedUntil.get(proxy)
+    if (until === undefined) return false
+    if (Date.now() < until) return true
+    this.blockedUntil.delete(proxy)
+    return false
+  }
+
+  /** Drop a failed proxy from the on-disk pool so a new session cannot reuse it. */
+  private removeFromCache(proxy: string): void {
+    const cached = readCache(this.cachePath)
+    const remaining = cached.filter((entry) => entry.url !== proxy)
+    if (remaining.length !== cached.length) writeCacheEntries(this.cachePath, remaining)
   }
 
   /** Return a validated pool of proxies, reusing the on-disk cache when fresh. */
   private async workingPool(deadline = Infinity): Promise<readonly string[]> {
     const cached = readCache(this.cachePath)
-    if (cached.length > 0) {
-      const fresh = cached.filter((entry) => Date.now() - entry.timestamp < CACHE_TTL_MS).map((entry) => entry.url)
+    const newest = newestTimestamp(cached)
+    if (cached.length > 0 && Date.now() - newest < CACHE_TTL_MS) {
+      // If this process is doing its startup/periodic revalidation, wait for
+      // it instead of handing the request proxies that may have just died.
+      if (this.searching && Date.now() - newest >= REFRESH_AGE_MS && Date.now() < deadline - 1_000) {
+        await this.searching
+        return this.readPool()
+      }
+      const fresh = this.readPool()
       if (fresh.length > 0) return fresh
     }
     // Don't hammer the proxy lists when the last search came up empty, and
@@ -418,9 +471,14 @@ export class ProxyRotator {
     if (Date.now() >= deadline - 1_000) return []
     if (Date.now() - this.lastSearchAt < SEARCH_MIN_INTERVAL_MS) return []
     await this.search()
+    return this.readPool()
+  }
+
+  private readPool(): readonly string[] {
     return readCache(this.cachePath)
       .filter((entry) => Date.now() - entry.timestamp < CACHE_TTL_MS)
       .map((entry) => entry.url)
+      .filter((url) => !this.isBlocked(url))
   }
 
   /**
@@ -491,12 +549,23 @@ function readCache(file: string): CachedProxy[] {
   }
 }
 
+function newestTimestamp(entries: readonly CachedProxy[]): number {
+  return entries.reduce((newest, entry) => Math.max(newest, entry.timestamp), 0)
+}
+
 function writeCache(file: string, proxies: readonly string[]): void {
   const now = Date.now()
-  const body = proxies.map((url) => `${now}|${url}`).join("\n")
+  writeCacheEntries(
+    file,
+    proxies.map((url) => ({ timestamp: now, url })),
+  )
+}
+
+function writeCacheEntries(file: string, entries: readonly CachedProxy[]): void {
+  const body = entries.map((entry) => `${entry.timestamp}|${entry.url}`).join("\n")
   try {
     mkdirSyncSafe(path.dirname(file))
-    writeFileSyncSafe(file, `${body}\n`)
+    writeFileSyncSafe(file, body ? `${body}\n` : "")
   } catch {
     // cache is best-effort
   }
