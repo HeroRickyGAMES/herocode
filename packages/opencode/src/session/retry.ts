@@ -33,12 +33,12 @@ export const RETRY_MAX_RETRIES = 5
 // fresh egress IP gets a chance instead of honoring the server's multi-hour
 // `retry-after` (Zen resets its daily free quota at midnight UTC).
 export const RETRY_PROXY_RESCAN_DELAY = 10_000
-// Unlimited by default while the proxy rotator is active: every free-tier IP
-// limit triggers another rescan and a new egress IP instead of an upsell, until
-// a proxy succeeds or the user aborts. The caller can still pass finite values
-// to opt into a bound.
-export const RETRY_PROXY_MAX_RETRIES = Number.POSITIVE_INFINITY
-export const RETRY_PROXY_MAX_ELAPSED_MS = Number.POSITIVE_INFINITY
+// While the proxy rotator is active, keep retrying across fresh egress IPs, but
+// always bounded in wall-clock time. The rotator already caps a single request
+// at two minutes; this ceiling stops the session-level retry loop after a few
+// failed pools so a dead public pool can never hold a session for hours.
+export const RETRY_PROXY_MAX_RETRIES = 20
+export const RETRY_PROXY_MAX_ELAPSED_MS = 4 * 60_000
 
 const RETRYABLE_MESSAGE_PATTERNS = [
   /429|500|502|503|504|524/i,

@@ -34,9 +34,21 @@ import path from "path"
 //   queue, then validates concurrently with a short per-proxy timeout. A search
 //   stops as soon as enough working proxies are found, so it never spends
 //   minutes scanning dead lists.
-// - Rotation is unlimited by default: a request keeps trying fresh proxies
-//   until one answers or the caller aborts. A request never retries the same
-//   proxy twice; the active proxy stays sticky across requests.
+// - A cached proxy is revalidated immediately before it is handed to a real
+//   request, so a pool entry that died seconds after discovery is never used
+//   as a live connection. Preflights run concurrently, so one dead batch costs
+//   a few seconds, not one attempt timeout per proxy.
+// - Proxies that completed a real provider request are remembered in a
+//   per-provider `known.txt` file and validated first on the next search, so a
+//   restart starts from proxies that demonstrably worked instead of the whole
+//   public internet.
+// - TLS handshake failures (e.g. `unable to verify the first certificate`)
+//   mean the proxy is intercepting the tunnel. They rotate like any other
+//   transport failure and the proxy is parked for a long time.
+// - Rotation is bounded by a wall-clock budget (2 minutes by default): the
+//   request keeps trying fresh proxies until one answers, the budget expires,
+//   or the caller aborts. A request never retries the same proxy twice; the
+//   active proxy stays sticky across requests.
 //
 // This module is intentionally dependency-free (only global `fetch` and Node
 // builtins) so it stays simple and testable.
@@ -63,15 +75,16 @@ export interface ProxyRotatorOptions {
   /**
    * Per-attempt hard timeout in milliseconds. The rotator aborts a request that
    * has not produced a response (headers) within this window and treats it as a
-   * dead proxy, so a hung connection never parks the session. Defaults to 45s
-   * for a direct connection and 20s for a proxy attempt. Pass `false` to rely
+   * dead proxy, so a hung connection never parks the session. Defaults to 30s
+   * for a direct connection and 10s for a proxy attempt. Pass `false` to rely
    * solely on the caller's own timeouts.
    */
   readonly requestTimeoutMs?: number | false
   /**
    * Wall-clock ceiling for a single request's proxy rotation. Once exceeded the
    * last response/error is surfaced to the caller instead of searching again.
-   * Disabled by default (no wall-clock limit); pass a number to bound it.
+   * Defaults to two minutes so a bad public pool can never park a session for
+   * hours; pass `false` to hunt until the caller aborts.
    */
   readonly maxRotationMs?: number | false
   /** Override the cache directory (defaults to `~/.cache/opencode/proxies`). */
@@ -86,6 +99,13 @@ export interface ProxyRotatorOptions {
   /** Override proxy discovery+validation (used by tests; defaults to the
    * public proxy lists). Must return validated, currently-working proxies. */
   readonly search?: () => Promise<string[]>
+  /** Override the per-proxy preflight check (used by tests). Returns true when
+   * the proxy can carry a request to the target right now. */
+  readonly validate?: (proxy: string) => Promise<boolean>
+  /** How long a proxy that completed a real provider request may skip
+   * preflight. Discovery cache entries are always preflighted. Defaults to
+   * 45s; tests set it to 0. */
+  readonly preflightTrustMs?: number
 }
 
 const RATE_LIMIT_STATUSES = new Set([429, 529])
@@ -115,6 +135,30 @@ const CONNECTION_ERROR_PATTERNS = [
   /timed out/i,
   /the operation was aborted/i,
   /aborted/i,
+  /unable to verify the first certificate/i,
+  /unable to get local issuer certificate/i,
+  /certificate[_ ]verify[_ ]failed/i,
+  /self[- ]signed certificate/i,
+  /certificate has expired/i,
+  /altname/i,
+  /err_tls/i,
+  /tls handshake/i,
+  /ssl routines/i,
+]
+
+// TLS failures usually mean the proxy is intercepting HTTPS (MITM) instead of
+// tunnelling it. Even if the proxy later answers, its certificate chain cannot
+// be trusted, so keep it parked for a long time.
+const TLS_ERROR_PATTERNS = [
+  /unable to verify the first certificate/i,
+  /unable to get local issuer certificate/i,
+  /certificate[_ ]verify[_ ]failed/i,
+  /self[- ]signed certificate/i,
+  /certificate has expired/i,
+  /altname/i,
+  /err_tls/i,
+  /tls handshake/i,
+  /ssl routines/i,
 ]
 
 // A proxy source is a URL plus an optional parser. Without a parser the body is
@@ -209,27 +253,44 @@ const PROXY_SOURCES: readonly ProxySource[] = [
   },
 ]
 
-// Unlimited by default: the request keeps rotating through freshly discovered
-// proxies until one answers or the caller aborts. Callers can still pass a
-// finite attempt/time budget when they want one.
+// Unlimited attempts, but always bounded by a wall clock. A session must never
+// sit for hours on a dead public pool: two minutes is enough to preflight a
+// batch, try a few live proxies and surface a real error to the user.
 const DEFAULT_MAX_ATTEMPTS = Number.POSITIVE_INFINITY
-const DEFAULT_REQUEST_TIMEOUT_MS = 45_000
-const PROXY_ATTEMPT_TIMEOUT_MS = 15_000
-const DEFAULT_MAX_ROTATION_MS = false
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+const PROXY_ATTEMPT_TIMEOUT_MS = 10_000
+const DEFAULT_MAX_ROTATION_MS = 2 * 60_000
 // Dead connections are blacklisted for a while so later requests never start
 // by retrying the same corpse. Rate-limited IPs are parked a bit shorter.
 const CONNECTION_BLOCK_MS = 10 * 60_000
 const RATE_LIMIT_BLOCK_MS = 5 * 60_000
-const VALIDATION_TIMEOUT_MS = 2_500
+// Certificate-injecting proxies cannot be fixed by retrying, so park them for
+// a long time and never spend another validation slot on them.
+const TLS_BLOCK_MS = 6 * 60 * 60_000
+const VALIDATION_TIMEOUT_MS = 3_000
 const SEARCH_DEADLINE_MS = 25_000
 // Stop searching once this many proxies passed validation. A larger pool is
 // important because free proxies die constantly and many are already burned.
 const SEARCH_TARGET = 32
-// A cached proxy is trusted for at most two minutes. Free proxies die fast, so
-// a longer TTL mostly serves corpses.
-const CACHE_TTL_MS = 120_000
+// A cached proxy is trusted for at most five minutes. Entries are still
+// preflighted right before use; this TTL only controls how long discovery
+// results are kept before a full rescan.
+const CACHE_TTL_MS = 5 * 60_000
+// Only proxies that already carried a real provider request may skip
+// preflight, and only for this long. Bulk discovery cache entries are never
+// trusted without a fresh check — public lists are mostly corpses.
+const PREFLIGHT_TRUST_MS = 45_000
+// Validate this many cached candidates concurrently before giving up on a pool.
+const PREFLIGHT_BATCH = 12
+// Do not start a full internet rescan when less than this remains on the
+// request rotation budget (a rescan needs SEARCH_DEADLINE_MS).
+const RESCAN_MIN_REMAINING_MS = 20_000
+// Proxies that completed a real provider request are kept for this long and
+// validated first on every new search.
+const HISTORY_TTL_MS = 6 * 60 * 60_000
+const HISTORY_MAX = 200
 // Refresh the pool once the newest cached proxy is older than this.
-const REFRESH_AGE_MS = 45_000
+const REFRESH_AGE_MS = 60_000
 const DEFAULT_REFRESH_INTERVAL_MS = 40_000
 // Don't re-run an expensive proxy search more often than this.
 const SEARCH_MIN_INTERVAL_MS = 4_000
@@ -251,9 +312,12 @@ export class ProxyRotator {
   private readonly requestTimeoutMs: number | false
   private readonly maxRotationMs: number | false
   private readonly cachePath: string
+  private readonly historyPath: string
   private readonly extraSources: readonly string[]
   private readonly refreshIntervalMs: number | false
   private readonly searchOverride?: () => Promise<string[]>
+  private readonly validateOverride?: (proxy: string) => Promise<boolean>
+  private readonly preflightTrustMs: number
 
   private activeProxy: string | undefined
   private lastSearchAt = 0
@@ -266,6 +330,8 @@ export class ProxyRotator {
   // Proxies that recently failed are parked so later requests do not start
   // their rotation with the same dead/burned connections.
   private readonly blockedUntil = new Map<string, number>()
+  // Avoid rewriting the cache/history files on every successful request.
+  private readonly confirmedAt = new Map<string, number>()
 
   constructor(options: ProxyRotatorOptions) {
     this.target = options.target.replace(/\/$/, "")
@@ -274,10 +340,14 @@ export class ProxyRotator {
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
     this.maxRotationMs = options.maxRotationMs ?? DEFAULT_MAX_ROTATION_MS
-    this.cachePath = path.join(options.cacheDir ?? proxyCacheDir(), "working.txt")
+    const cacheDir = options.cacheDir ?? proxyCacheDir()
+    this.cachePath = path.join(cacheDir, "working.txt")
+    this.historyPath = path.join(cacheDir, "known.txt")
     this.extraSources = options.extraSources ?? []
     this.refreshIntervalMs = options.refreshIntervalMs ?? DEFAULT_REFRESH_INTERVAL_MS
     this.searchOverride = options.search
+    this.validateOverride = options.validate
+    this.preflightTrustMs = options.preflightTrustMs ?? PREFLIGHT_TRUST_MS
   }
 
   get proxy(): string | undefined {
@@ -335,6 +405,12 @@ export class ProxyRotator {
   static isConnectionFailure(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error)
     return CONNECTION_ERROR_PATTERNS.some((pattern) => pattern.test(message))
+  }
+
+  /** True when the tunnel failed TLS verification (usually a MITM proxy). */
+  static isTlsFailure(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    return TLS_ERROR_PATTERNS.some((pattern) => pattern.test(message))
   }
 
   /**
@@ -395,7 +471,7 @@ export class ProxyRotator {
         // restart the search from scratch.
         if (!ProxyRotator.isConnectionFailure(error)) throw error
         lastError = error
-        this.discard(proxy, used)
+        this.discard(proxy, used, ProxyRotator.isTlsFailure(error))
         if (attempt >= this.maxAttempts) throw error
         proxy = await this.nextProxy(used, messageOf(error), deadline)
         if (!proxy) await waitForPool(deadline, signal)
@@ -404,7 +480,12 @@ export class ProxyRotator {
       clearTimeout(timer)
       // A successful response is returned untouched. Statuses that a different
       // egress IP cannot fix (auth errors, bad requests) surface immediately.
-      if (!ProxyRotator.shouldRotate(result.status)) return result
+      if (!ProxyRotator.shouldRotate(result.status)) {
+        // The proxy demonstrably carried a real request to the provider, so
+        // remember it as a known-good candidate for the next search.
+        if (proxy) this.confirm(proxy)
+        return result
+      }
       lastResult = result
       if (attempt >= this.maxAttempts) return result
       // Never retry through the same (or no) connection: mark it used, park it
@@ -417,47 +498,123 @@ export class ProxyRotator {
   }
 
   /**
-   * Pick the next proxy from the working pool that this request has not tried
-   * yet. When the pool is exhausted, force a fresh list + validation pass. If
-   * the rescan only returns already-tried proxies, return `undefined` so the
-   * caller waits or gives up instead of hammering the same connection.
+   * Pick the next proxy that this request has not tried yet, after proving it
+   * still works. Every candidate is either trusted because it was validated
+   * seconds ago or preflighted against the target right now, so a corpse left
+   * in the cache is discarded before the provider request spends its attempt
+   * timeout on it. When the whole pool fails, rescan once and preflight the
+   * fresh batch.
    */
   private async nextProxy(
     used: Set<string>,
     reason = "no proxy available",
     deadline = Infinity,
   ): Promise<string | undefined> {
-    const pool = await this.workingPool(deadline)
-    const candidate = pool.find((url) => !used.has(url))
-    if (candidate) {
-      used.add(candidate)
-      this.activeProxy = candidate
-      this.onStatus?.({ kind: "switch", proxy: candidate })
-      return candidate
-    }
+    let rescanned = false
+    for (;;) {
+      const pool = this.readPool()
+      const live = await this.preflight(
+        pool.filter((entry) => !used.has(entry.url)),
+        deadline,
+      )
+      const candidate = live[0]
+      if (candidate) {
+        used.add(candidate)
+        this.activeProxy = candidate
+        this.onStatus?.({ kind: "switch", proxy: candidate })
+        return candidate
+      }
 
-    // Every proxy in the cached pool has already been tried (typically each one
-    // returned 429/5xx). Never reuse a dead/rate limited proxy: rescan the
-    // internet for a fresh batch and validate it against the target.
-    if (Date.now() >= deadline - 1_000) return undefined
-    this.onStatus?.({ kind: "rescan", reason })
-    await this.search()
-    const fresh = await this.workingPool(deadline)
-    const next = fresh.find((url) => !used.has(url))
-    if (!next) return undefined
-    used.add(next)
-    this.activeProxy = next
-    this.onStatus?.({ kind: "switch", proxy: next })
-    return next
+      // Never reuse a dead/rate limited proxy. Rescan the internet for a fresh
+      // batch, validate it against the target, then preflight again. If that
+      // also yields nothing (or the search was throttled), let the caller wait
+      // or give up instead of spinning.
+      if (rescanned || deadline - Date.now() < RESCAN_MIN_REMAINING_MS) return undefined
+      rescanned = true
+      this.onStatus?.({ kind: "rescan", reason })
+      await this.search()
+    }
   }
 
-  private discard(proxy: string | undefined, used: Set<string>): void {
+  /**
+   * Return proxies that answer right now. Only proxies that recently completed
+   * a real provider request skip the check; discovery cache entries are always
+   * preflighted concurrently in batches until at least one passes or the pool
+   * is exhausted.
+   */
+  private async preflight(entries: readonly CachedProxy[], deadline: number): Promise<string[]> {
+    const now = Date.now()
+    const trusted = entries
+      .filter((entry) => this.preflightTrusted(entry.url, now))
+      .map((entry) => entry.url)
+    if (trusted.length > 0) return trusted
+
+    const check = entries.filter((entry) => !this.preflightTrusted(entry.url, now))
+    const live: string[] = []
+    for (let offset = 0; offset < check.length; offset += PREFLIGHT_BATCH) {
+      const remaining = deadline - Date.now()
+      if (remaining < 50) break
+      const batch = check.slice(offset, offset + PREFLIGHT_BATCH)
+      const results = await Promise.all(
+        batch.map(async (entry) => {
+          const left = deadline - Date.now()
+          if (left < 50) return undefined
+          const timeout = Math.min(VALIDATION_TIMEOUT_MS, Math.max(1, left))
+          const ok = this.validateOverride
+            ? await this.validateOverride(entry.url)
+            : await testProxy(this.target, entry.url, undefined, timeout)
+          if (ok) return entry.url
+          this.block(entry.url, CONNECTION_BLOCK_MS)
+          this.removeFromCache(entry.url)
+          return undefined
+        }),
+      )
+      for (const url of results) {
+        if (url) live.push(url)
+      }
+      if (live.length > 0) return live
+    }
+    return live
+  }
+
+  /** Skip preflight only for proxies that recently completed a real request. */
+  private preflightTrusted(url: string, now: number): boolean {
+    if (this.preflightTrustMs === 0) return false
+    const confirmed = this.confirmedAt.get(url)
+    if (confirmed === undefined) return false
+    return now - confirmed < this.preflightTrustMs
+  }
+
+  /** Remember a proxy that completed a real provider request. */
+  private confirm(proxy: string): void {
+    const now = Date.now()
+    const last = this.confirmedAt.get(proxy)
+    if (last !== undefined && now - last < 60_000) return
+    this.confirmedAt.set(proxy, now)
+
+    const cached = readCache(this.cachePath)
+    const updated = cached.some((entry) => entry.url === proxy)
+      ? cached.map((entry) => (entry.url === proxy ? { timestamp: now, url: proxy } : entry))
+      : [...cached, { timestamp: now, url: proxy }]
+    writeCacheEntries(this.cachePath, updated)
+
+    const history = readCache(this.historyPath)
+      .filter((entry) => entry.url !== proxy && now - entry.timestamp < HISTORY_TTL_MS)
+      .slice(0, HISTORY_MAX - 1)
+    writeCacheEntries(this.historyPath, [{ timestamp: now, url: proxy }, ...history])
+  }
+
+  private discard(proxy: string | undefined, used: Set<string>, tls = false): void {
     if (!proxy) return
     used.add(proxy)
-    this.block(proxy, CONNECTION_BLOCK_MS)
+    this.block(proxy, tls ? TLS_BLOCK_MS : CONNECTION_BLOCK_MS)
     this.removeFromCache(proxy)
     if (this.activeProxy === proxy) this.activeProxy = undefined
-    this.onStatus?.({ kind: "discard", proxy, reason: "could not connect through this proxy" })
+    this.onStatus?.({
+      kind: "discard",
+      proxy,
+      reason: tls ? "proxy intercepted TLS (certificate not trusted)" : "could not connect through this proxy",
+    })
   }
 
   private burn(proxy: string, used: Set<string>): void {
@@ -486,56 +643,11 @@ export class ProxyRotator {
     if (remaining.length !== cached.length) writeCacheEntries(this.cachePath, remaining)
   }
 
-  /** Return a validated pool of proxies, reusing the on-disk cache when fresh. */
-  private async workingPool(deadline = Infinity): Promise<readonly string[]> {
-    const cached = readCache(this.cachePath)
-    // Only entries validated by *this* process count. A fresh terminal must not
-    // start its first rotation with proxies another process found minutes ago.
-    const fresh = cached.some((entry) => entry.timestamp >= this.startedAt)
-    if (fresh) {
-      const pool = this.readPool()
-      if (pool.length > 0) {
-        // If this process is revalidating, wait for it instead of handing the
-        // request proxies that may have just died.
-        if (this.searching && Date.now() - newestTimestamp(cached) >= REFRESH_AGE_MS) {
-          await this.awaitSearch(deadline)
-          return this.readPool()
-        }
-        return pool
-      }
-    }
-    // A startup/periodic search is already running: wait for its result rather
-    // than starting another scan or returning an empty pool.
-    if (this.searching) {
-      await this.awaitSearch(deadline)
-      const pool = this.readPool()
-      if (pool.length > 0) return pool
-    }
-    // Don't hammer the proxy lists when the last search came up empty, and
-    // don't start a slow search when this request is nearly out of time.
-    if (Date.now() >= deadline - 1_000) return []
-    if (Date.now() - this.lastSearchAt < SEARCH_MIN_INTERVAL_MS) return []
-    await this.search()
-    return this.readPool()
-  }
-
-  /** Wait for an in-flight search without ever sleeping past the deadline. */
-  private async awaitSearch(deadline: number): Promise<void> {
-    if (!this.searching) return
-    if (!Number.isFinite(deadline)) {
-      await this.searching
-      return
-    }
-    const remaining = deadline - Date.now() - 1_000
-    if (remaining <= 0) return
-    await Promise.race([this.searching, sleep(remaining)])
-  }
-
-  private readPool(): readonly string[] {
+  /** Validated proxies from this process, still inside the cache TTL. */
+  private readPool(): CachedProxy[] {
     return readCache(this.cachePath)
       .filter((entry) => entry.timestamp >= this.startedAt && Date.now() - entry.timestamp < CACHE_TTL_MS)
-      .map((entry) => entry.url)
-      .filter((url) => !this.isBlocked(url))
+      .filter((entry) => !this.isBlocked(entry.url))
   }
 
   /**
@@ -552,7 +664,7 @@ export class ProxyRotator {
     const sources: ProxySource[] = [...PROXY_SOURCES, ...this.extraSources.map((url) => ({ url }))]
     this.searching = (this.searchOverride
       ? this.searchOverride()
-      : defaultSearch(this.target, sources)
+      : defaultSearch(this.target, sources, this.knownProxies())
     )
       .then((working) => {
         if (working.length > 0) writeCache(this.cachePath, working)
@@ -567,6 +679,16 @@ export class ProxyRotator {
     return this.searching
   }
 
+  /** Proxies that completed a real request recently, best first. */
+  private knownProxies(): string[] {
+    const now = Date.now()
+    return readCache(this.historyPath)
+      .filter((entry) => now - entry.timestamp < HISTORY_TTL_MS)
+      .filter((entry) => !this.isBlocked(entry.url))
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .map((entry) => entry.url)
+  }
+
   /** Re-validate the pool when the cache has gone stale. */
   private async refresh(): Promise<void> {
     const cached = readCache(this.cachePath)
@@ -575,9 +697,16 @@ export class ProxyRotator {
   }
 }
 
-async function defaultSearch(target: string, sources: readonly ProxySource[]): Promise<string[]> {
+async function defaultSearch(
+  target: string,
+  sources: readonly ProxySource[],
+  known: readonly string[] = [],
+): Promise<string[]> {
   const candidates = await fetchCandidates(sources)
-  return testProxies(target, candidates)
+  // Known-good proxies from previous runs are validated first, so a new
+  // process starts from connections that already carried real requests.
+  const seen = new Set(known)
+  return testProxies(target, [...known, ...candidates.filter((url) => !seen.has(url))])
 }
 
 function proxyCacheDir(): string {
@@ -604,10 +733,6 @@ function readCache(file: string): CachedProxy[] {
   } catch {
     return []
   }
-}
-
-function newestTimestamp(entries: readonly CachedProxy[]): number {
-  return entries.reduce((newest, entry) => Math.max(newest, entry.timestamp), 0)
 }
 
 function writeCache(file: string, proxies: readonly string[]): void {
@@ -756,18 +881,34 @@ async function testProxies(target: string, proxies: readonly string[]): Promise<
   return working
 }
 
-async function testProxy(target: string, proxy: string, signal?: AbortSignal): Promise<boolean> {
+async function testProxy(
+  target: string,
+  proxy: string,
+  signal?: AbortSignal,
+  timeoutMs = VALIDATION_TIMEOUT_MS,
+): Promise<boolean> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), VALIDATION_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   const combined = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
   try {
-    const response = await fetch(target, { proxy, signal: combined, redirect: "follow" })
+    const response = await fetch(target, {
+      proxy,
+      signal: combined,
+      redirect: "follow",
+      headers: { accept: "*/*" },
+    })
     // Require a 2xx from the provider itself. Bun surfaces a proxy that rejects
     // the HTTPS CONNECT as a regular 400 response, so accepting any status made
     // fake "proxies" (Cloudflare edge IPs, open ports) pass validation and every
     // provider request then failed with `Bad Request`. A real tunnel to the
-    // provider origin answers 2xx; a broken one never does.
-    return response.ok
+    // provider origin answers 2xx; a broken one never does. Reject redirects
+    // that land off-origin (common captive-portal / junk-proxy behaviour).
+    if (!response.ok) return false
+    try {
+      return new URL(response.url).origin === new URL(target).origin
+    } catch {
+      return false
+    }
   } catch {
     return false
   } finally {

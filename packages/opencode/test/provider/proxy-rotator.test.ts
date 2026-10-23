@@ -3,6 +3,7 @@ import { tmpdir } from "../fixture/fixture"
 import { ProxyRotator } from "../../src/provider/proxy-rotator"
 
 const proxy = (n: number) => `http://10.0.0.${n}:8080`
+const validateCachedTestProxies = async (url: string) => /^http:\/\/10\.0\.0\.\d+:8080$/.test(url)
 
 describe("provider.ProxyRotator.shouldRotate", () => {
   test("rotates only on proxy-relevant statuses", () => {
@@ -38,6 +39,7 @@ describe("provider.ProxyRotator.withRetry", () => {
       target: "https://opencode.ai",
       id: "with-retry",
       cacheDir: tmp.path,
+      validate: validateCachedTestProxies,
     })
     const cache = [proxy(1), proxy(2), proxy(3)].map((url) => `${Date.now()}|${url}`).join("\n")
     await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
@@ -60,6 +62,7 @@ describe("provider.ProxyRotator.withRetry", () => {
       target: "https://opencode.ai",
       id: "with-retry",
       cacheDir: tmp.path,
+      validate: validateCachedTestProxies,
     })
     const cache = [proxy(1), proxy(2)].map((url) => `${Date.now()}|${url}`).join("\n")
     await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
@@ -95,6 +98,7 @@ describe("provider.ProxyRotator.withRetry", () => {
       cacheDir: tmp.path,
       maxAttempts: 4,
       search: async () => [proxy(1), proxy(2), proxy(3)],
+      validate: validateCachedTestProxies,
     })
     const cache = [proxy(1), proxy(2), proxy(3)].map((url) => `${Date.now()}|${url}`).join("\n")
     await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
@@ -118,6 +122,7 @@ describe("provider.ProxyRotator.withRetry", () => {
       cacheDir: tmp.path,
       maxAttempts: 2,
       search: async () => [proxy(1), proxy(2)],
+      validate: validateCachedTestProxies,
     })
     const cache = [proxy(1), proxy(2)].map((url) => `${Date.now()}|${url}`).join("\n")
     await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
@@ -141,6 +146,7 @@ describe("provider.ProxyRotator.withRetry", () => {
       cacheDir: tmp.path,
       maxAttempts: 2,
       search: async () => [proxy(2)],
+      validate: validateCachedTestProxies,
     })
     const cache = [proxy(1)].map((url) => `${Date.now()}|${url}`).join("\n")
     await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
@@ -174,6 +180,7 @@ describe("provider.ProxyRotator.withRetry", () => {
       id: "with-retry",
       cacheDir: tmp.path,
       requestTimeoutMs: 50,
+      validate: validateCachedTestProxies,
     })
     const cache = [proxy(1), proxy(2)].map((url) => `${Date.now()}|${url}`).join("\n")
     await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
@@ -212,6 +219,7 @@ describe("provider.ProxyRotator.withRetry", () => {
         searches++
         return [proxy(2)]
       },
+      validate: validateCachedTestProxies,
     })
     const cache = [proxy(1)].map((url) => `${Date.now()}|${url}`).join("\n")
     await Bun.write(`${tmp.path}/working.txt`, `${cache}\n`)
@@ -235,8 +243,9 @@ describe("provider.ProxyRotator.withRetry", () => {
       id: "with-retry",
       cacheDir: tmp.path,
       maxAttempts: 100,
-      maxRotationMs: 120,
+      maxRotationMs: 500,
       search: async () => [proxy(1), proxy(2), proxy(3), proxy(4), proxy(5)],
+      validate: validateCachedTestProxies,
     })
     const cache = [proxy(1), proxy(2), proxy(3), proxy(4), proxy(5)]
       .map((url) => `${Date.now()}|${url}`)
@@ -282,5 +291,98 @@ describe("provider.ProxyRotator.withRetry", () => {
     // stop() must halt the loop.
     expect(searches).toBe(after)
     expect(after).toBeGreaterThanOrEqual(3)
+  })
+})
+describe("provider.ProxyRotator TLS failures", () => {
+  test("rotates on certificate verification errors", () => {
+    const error = new Error("unable to verify the first certificate")
+    expect(ProxyRotator.isConnectionFailure(error)).toBe(true)
+    expect(ProxyRotator.isTlsFailure(error)).toBe(true)
+  })
+
+  test("does not classify unrelated errors as TLS failures", () => {
+    expect(ProxyRotator.isTlsFailure(new Error("Cannot connect to API: Unable to connect"))).toBe(false)
+  })
+})
+
+describe("provider.ProxyRotator preflight", () => {
+  test("drops a stale dead cached proxy before a request uses it", async () => {
+    await using tmp = await tmpdir()
+    const rotator = new ProxyRotator({
+      target: "https://opencode.ai",
+      id: "preflight",
+      cacheDir: tmp.path,
+      maxAttempts: 2,
+      preflightTrustMs: 0,
+      validate: async (url) => url === proxy(2),
+      search: async () => [proxy(2)],
+    })
+    const stale = Date.now()
+    await Bun.write(`${tmp.path}/working.txt`, `${stale}|${proxy(1)}\n${stale}|${proxy(2)}\n`)
+
+    const seen: Array<string | undefined> = []
+    const send = async (p: string | undefined) => {
+      seen.push(p)
+      if (p === undefined) return { status: 503, response: new Response(null, { status: 503 }) }
+      return { status: 200, response: new Response(null, { status: 200 }) }
+    }
+
+    const { status } = await rotator.withRetry(send)
+    expect(status).toBe(200)
+    expect(seen).toStrictEqual([undefined, proxy(2)])
+  })
+
+  test("preflights every discovery cache entry even when it was validated seconds ago", async () => {
+    await using tmp = await tmpdir()
+    const checked: string[] = []
+    const rotator = new ProxyRotator({
+      target: "https://opencode.ai",
+      id: "preflight-discovery",
+      cacheDir: tmp.path,
+      maxAttempts: 2,
+      validate: async (url) => {
+        checked.push(url)
+        return url === proxy(1)
+      },
+    })
+    await Bun.write(`${tmp.path}/working.txt`, `${Date.now()}|${proxy(1)}\n`)
+
+    const send = async (p: string | undefined) => {
+      if (p === undefined) return { status: 503, response: new Response(null, { status: 503 }) }
+      return { status: 200, response: new Response(null, { status: 200 }) }
+    }
+
+    expect((await rotator.withRetry(send)).status).toBe(200)
+    expect(checked).toContain(proxy(1))
+  })
+})
+
+describe("provider.ProxyRotator stickiness", () => {
+  test("reuses the working proxy on the next request", async () => {
+    await using tmp = await tmpdir()
+    const rotator = new ProxyRotator({
+      target: "https://opencode.ai",
+      id: "sticky",
+      cacheDir: tmp.path,
+      validate: validateCachedTestProxies,
+    })
+    await Bun.write(`${tmp.path}/working.txt`, `${Date.now()}|${proxy(1)}\n`)
+
+    const first: Array<string | undefined> = []
+    const firstSend = async (p: string | undefined) => {
+      first.push(p)
+      const status = p ? 200 : 503
+      return { status, response: new Response(null, { status }) }
+    }
+    expect((await rotator.withRetry(firstSend)).status).toBe(200)
+    expect(first).toStrictEqual([undefined, proxy(1)])
+
+    const second: Array<string | undefined> = []
+    const secondSend = async (p: string | undefined) => {
+      second.push(p)
+      return { status: 200, response: new Response(null, { status: 200 }) }
+    }
+    expect((await rotator.withRetry(secondSend)).status).toBe(200)
+    expect(second).toStrictEqual([proxy(1)])
   })
 })
