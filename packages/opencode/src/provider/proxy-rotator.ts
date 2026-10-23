@@ -34,9 +34,9 @@ import path from "path"
 //   queue, then validates concurrently with a short per-proxy timeout. A search
 //   stops as soon as enough working proxies are found, so it never spends
 //   minutes scanning dead lists.
-// - Rotation is bounded per request by both `maxAttempts` and a wall-clock
-//   `maxRotationMs` budget. A request may try each proxy in the pool at most
-//   once; the active proxy stays sticky across requests.
+// - Rotation is unlimited by default: a request keeps trying fresh proxies
+//   until one answers or the caller aborts. A request never retries the same
+//   proxy twice; the active proxy stays sticky across requests.
 //
 // This module is intentionally dependency-free (only global `fetch` and Node
 // builtins) so it stays simple and testable.
@@ -56,8 +56,8 @@ export interface ProxyRotatorOptions {
   readonly onStatus?: (status: ProxyStatus) => void
   /**
    * Optional ceiling on how many times a single provider request may be retried
-   * across proxy switches. Defaults to a finite budget so a request can never
-   * rotate forever when every proxy is dead or the upstream keeps failing.
+   * across proxy switches. Unlimited by default: the request keeps hunting for
+   * a working proxy until one answers or the caller aborts.
    */
   readonly maxAttempts?: number
   /**
@@ -71,8 +71,7 @@ export interface ProxyRotatorOptions {
   /**
    * Wall-clock ceiling for a single request's proxy rotation. Once exceeded the
    * last response/error is surfaced to the caller instead of searching again.
-   * Defaults to 90s. Pass `false` for no wall-clock limit (attempt budget still
-   * applies).
+   * Disabled by default (no wall-clock limit); pass a number to bound it.
    */
   readonly maxRotationMs?: number | false
   /** Override the cache directory (defaults to `~/.cache/opencode/proxies`). */
@@ -210,12 +209,13 @@ const PROXY_SOURCES: readonly ProxySource[] = [
   },
 ]
 
-// Finite by default: a request may try many proxies, but the wall-clock budget
-// is the real bound so a session cannot loop for hours.
-const DEFAULT_MAX_ATTEMPTS = 30
+// Unlimited by default: the request keeps rotating through freshly discovered
+// proxies until one answers or the caller aborts. Callers can still pass a
+// finite attempt/time budget when they want one.
+const DEFAULT_MAX_ATTEMPTS = Number.POSITIVE_INFINITY
 const DEFAULT_REQUEST_TIMEOUT_MS = 45_000
 const PROXY_ATTEMPT_TIMEOUT_MS = 15_000
-const DEFAULT_MAX_ROTATION_MS = 90_000
+const DEFAULT_MAX_ROTATION_MS = false
 // Dead connections are blacklisted for a while so later requests never start
 // by retrying the same corpse. Rate-limited IPs are parked a bit shorter.
 const CONNECTION_BLOCK_MS = 10 * 60_000
@@ -345,9 +345,9 @@ export class ProxyRotator {
    * when the transport fails before a response is available.
    *
    * Each request tracks the proxies it already tried. The active proxy remains
-   * sticky across requests, but one request never retries the same proxy and a
-   * single request can never spend more than `maxRotationMs` waiting for a
-   * replacement, so a resumed session cannot park for hours.
+   * sticky across requests, but one request never retries the same proxy. By
+   * default there is no attempt or wall-clock limit: it keeps hunting until a
+   * proxy answers or the caller aborts.
    */
   async withRetry(
     send: (proxy: string | undefined, signal?: AbortSignal) => Promise<{ status: number; response: Response }>,
