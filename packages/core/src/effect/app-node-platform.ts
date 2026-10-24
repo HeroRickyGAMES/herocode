@@ -18,7 +18,7 @@ const withoutBunTimeout = Layer.effect(
   }),
 )
 
-const proxyFetch = Object.assign(ProxyRotator.fetch, { preconnect: globalThis.fetch.preconnect })
+export const proxyFetch = Object.assign(ProxyRotator.fetch, { preconnect: globalThis.fetch.preconnect })
 
 export const proxyHttpClient = makeGlobalNode({
   service: HttpClient.HttpClient,

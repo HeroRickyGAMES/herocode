@@ -20,8 +20,9 @@ describe("proxy rotator", () => {
     expect(ProxyRotator.parseProxyLines(text)).toEqual(["http://127.0.0.1:8080", "socks5://127.0.0.1:1080"])
   })
 
-  test("rotates only on rate-limit and proxy failure statuses", () => {
+  test("rotates on rate-limit, quota, and proxy failure statuses", () => {
     expect(ProxyRotator.shouldRotate(429)).toBe(true)
+    expect(ProxyRotator.shouldRotate(402)).toBe(true)
     expect(ProxyRotator.shouldRotate(529)).toBe(true)
     expect(ProxyRotator.shouldRotate(407)).toBe(true)
     expect(ProxyRotator.shouldRotate(500)).toBe(false)

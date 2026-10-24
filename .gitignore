@@ -11,6 +11,7 @@ node_modules
 playground
 tmp
 dist
+dist-*
 dist-node
 ts-dist
 .turbo

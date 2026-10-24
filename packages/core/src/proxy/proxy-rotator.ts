@@ -31,7 +31,8 @@ const FAILURES_BEFORE_BLOCK = 2
 const BLOCK_MS = 10 * 60_000
 const DEFAULT_VALIDATION_URL = "https://api.ipify.org"
 
-const ROTATE_STATUS = new Set([407, 408, 425, 429, 529])
+// OpenCode Zen reports an exhausted free quota as 402 as well as 429, so both rotate.
+const ROTATE_STATUS = new Set([402, 407, 408, 425, 429, 529])
 
 const localHost = (hostname: string) => {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "")
@@ -382,7 +383,9 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const selected = active ?? (!force && !directTried && !proxyTried ? undefined : pick(excluded))
     if (!selected && (force || directTried || proxyTried)) {
-      const proxy = await waitForProxy(Math.min(10_000, Math.max(0, deadline - Date.now())), excluded)
+      // The pool validates in the background, so a limited request waits for the
+      // first proxy instead of failing with the direct quota error.
+      const proxy = await waitForProxy(Math.min(30_000, Math.max(0, deadline - Date.now())), excluded)
       if (!proxy) break
       continue
     }
@@ -403,6 +406,7 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
     try {
       const remaining = Math.max(1_000, deadline - Date.now())
       const response = await send(input, init, proxy, Math.min(ATTEMPT_TIMEOUT_MS, remaining))
+      debug("response", proxy ?? "direct", response.status)
       if (!shouldRotate(response.status)) {
         if (selected) markSuccess(selected)
         return response
