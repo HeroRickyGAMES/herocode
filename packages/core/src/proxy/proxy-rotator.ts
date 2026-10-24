@@ -17,19 +17,25 @@ interface Entry {
   checkedAt: number
 }
 
-const POOL_TARGET = 16
-const POOL_CACHE_LIMIT = 64
-const POOL_FRESH_MS = 15 * 60_000
+const POOL_TARGET = 64
+const POOL_CACHE_LIMIT = 512
+const POOL_FRESH_MS = 60 * 60_000
 const REFRESH_MS = 4 * 60_000
-const VALIDATE_TIMEOUT_MS = 6_000
-const VALIDATE_CONCURRENCY = 24
-const MAX_CANDIDATES = 240
+const VALIDATE_TIMEOUT_MS = 12_000
+const VALIDATE_CONCURRENCY = 48
+const MAX_CANDIDATES = 400
 const ATTEMPT_TIMEOUT_MS = 20_000
 const ROTATION_BUDGET_MS = 60_000
 const MAX_ATTEMPTS = 7
 const FAILURES_BEFORE_BLOCK = 2
 const BLOCK_MS = 10 * 60_000
-const DEFAULT_VALIDATION_URL = "https://api.ipify.org"
+// A proxy that already spent the daily free quota stays useless for hours, so it
+// leaves the pool instead of wasting an attempt on every request.
+const QUOTA_BLOCK_MS = 6 * 60 * 60_000
+const THROTTLE_BLOCK_MS = 60 * 60_000
+// Validate against the endpoint that actually matters: a proxy that cannot reach
+// OpenCode is not compatible with the model traffic it will carry.
+const DEFAULT_VALIDATION_URL = "https://opencode.ai/"
 
 // OpenCode Zen reports an exhausted free quota as 402 as well as 429, so both rotate.
 const ROTATE_STATUS = new Set([402, 407, 408, 425, 429, 529])
@@ -50,12 +56,23 @@ const local = (target: string) => {
   return url ? localHost(url.hostname) : false
 }
 
-const SOURCES: ReadonlyArray<{ url: string; fallback: string }> = [
+type Source = {
+  readonly url: string
+  readonly fallback?: string
+  // Most lists are one `host:port` per line. The other kinds need their own parse.
+  readonly kind?: "hideip" | "geonode" | "advanced"
+}
+
+const SOURCES: ReadonlyArray<Source> = [
   { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt", fallback: "http" },
   { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/http/data.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt", fallback: "http" },
   {
-    url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/socks5/data.txt",
+    url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/https/data.txt",
+    fallback: "https",
+  },
+  {
+    url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
     fallback: "socks5",
   },
   { url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", fallback: "http" },
@@ -67,14 +84,37 @@ const SOURCES: ReadonlyArray<{ url: string; fallback: string }> = [
   { url: "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt", fallback: "http" },
   { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt", kind: "hideip", fallback: "https" },
+  { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt", kind: "hideip", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt", kind: "hideip", fallback: "socks5" },
   {
     url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text",
     fallback: "http",
   },
   {
+    url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=https&proxy_format=ipport&format=text",
+    fallback: "https",
+  },
+  {
     url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text",
     fallback: "socks5",
   },
+  { url: "https://advanced.name/freeproxy?type=http", kind: "advanced", fallback: "http" },
+  { url: "https://advanced.name/freeproxy?type=https", kind: "advanced", fallback: "https" },
+  { url: "https://advanced.name/freeproxy?type=socks5", kind: "advanced", fallback: "socks5" },
+  ...["http,https", "socks5"].flatMap((protocols) =>
+    [1, 2, 3].map((page) => ({
+      url: `https://proxylist.geonode.com/api/proxy-list?limit=500&page=${page}&sort_by=lastChecked&sort_type=desc&protocols=${protocols}`,
+      kind: "geonode" as const,
+    })),
+  ),
 ]
 
 let entries: Entry[] = []
@@ -121,8 +161,10 @@ export const parseProxyLines = (text: string, fallback = "http") =>
     return proxy ? [proxy] : []
   })
 
-const seeded = () => {
-  const values = `${process.env.OPENCODE_PROXY ?? ""}\n${process.env.OPENCODE_PROXY_LIST ?? ""}`
+const seeded = async () => {
+  const file = process.env.OPENCODE_PROXY_FILE
+  const fromFile = file ? await Bun.file(file).text().catch(() => "") : ""
+  const values = `${process.env.OPENCODE_PROXY ?? ""}\n${process.env.OPENCODE_PROXY_LIST ?? ""}\n${fromFile}`
   return parseProxyLines(values, "http")
 }
 
@@ -135,11 +177,59 @@ const fetchText = async (url: string) => {
   return response.text()
 }
 
+// hideip.me writes `host:port:Country`, so the country suffix must be dropped.
+const parseHideip = (text: string, fallback: string) =>
+  text.split(/\r?\n/).flatMap((line) => {
+    const [host, port] = line.trim().split(":")
+    const proxy = host && port ? normalize(`${host}:${port}`, fallback) : undefined
+    return proxy ? [proxy] : []
+  })
+
+const schemeOf = (protocols: readonly string[]) =>
+  protocols.includes("https") ? "https" : protocols.includes("socks5") ? "socks5" : protocols.includes("http") ? "http" : undefined
+
+const parseGeonode = (text: string) => {
+  const data: unknown = JSON.parse(text)
+  if (!data || typeof data !== "object" || !("data" in data) || !Array.isArray(data.data)) return []
+  return data.data.flatMap((entry: unknown) => {
+    if (!entry || typeof entry !== "object") return []
+    const ip = "ip" in entry && typeof entry.ip === "string" ? entry.ip : undefined
+    const port = "port" in entry && typeof entry.port === "string" ? entry.port : undefined
+    const protocols = "protocols" in entry && Array.isArray(entry.protocols) ? entry.protocols.filter((p) => typeof p === "string") : []
+    const scheme = schemeOf(protocols)
+    const proxy = ip && port && scheme ? normalize(`${scheme}://${ip}:${port}`) : undefined
+    return proxy ? [proxy] : []
+  })
+}
+
+// advanced.name hides every address as base64 inside `data-ip` and `data-port` cells.
+const parseAdvanced = (text: string, fallback: string) => {
+  const ips = [...text.matchAll(/data-ip="([^"]+)"/g)].map((match) => Buffer.from(match[1], "base64").toString())
+  const ports = [...text.matchAll(/data-port="([^"]+)"/g)].map((match) => Buffer.from(match[1], "base64").toString())
+  return ips.flatMap((ip, index) => {
+    const port = ports[index]
+    const proxy = ip && port ? normalize(`${ip}:${port}`, fallback) : undefined
+    return proxy ? [proxy] : []
+  })
+}
+
+const parseSource = (source: Source, text: string) => {
+  if (source.kind === "hideip") return parseHideip(text, source.fallback ?? "http")
+  if (source.kind === "advanced") return parseAdvanced(text, source.fallback ?? "http")
+  if (source.kind === "geonode")
+    try {
+      return parseGeonode(text)
+    } catch {
+      return []
+    }
+  return parseProxyLines(text, source.fallback)
+}
+
 const discover = async () => {
   const results = await Promise.allSettled(
     SOURCES.map(async (source) => {
       const text = await fetchText(source.url)
-      return text ? parseProxyLines(text, source.fallback) : []
+      return text ? parseSource(source, text) : []
     }),
   )
   return results.flatMap((result) => (result.status === "fulfilled" ? result.value : []))
@@ -174,12 +264,22 @@ const markFailure = (proxy: string) => {
   if (state.count >= FAILURES_BEFORE_BLOCK) state.blockedUntil = Date.now() + BLOCK_MS
   failures.set(proxy, state)
   debug("failed", proxy)
+  void saveCache()
 }
 
-const remove = (proxy: string) => {
-  if (proxy === active) return
-  entries = entries.filter((entry) => entry.proxy !== proxy)
-  SocksBridge.release(proxy)
+const markQuota = (proxy: string, status: number) => {
+  if (active === proxy) active = undefined
+  const state = failures.get(proxy) ?? { count: 0, blockedUntil: 0 }
+  state.count = FAILURES_BEFORE_BLOCK
+  state.blockedUntil = Math.max(state.blockedUntil, Date.now() + (status === 402 ? QUOTA_BLOCK_MS : THROTTLE_BLOCK_MS))
+  failures.set(proxy, state)
+  debug("quota", proxy, status)
+  void saveCache()
+  // A burned proxy shrinks the pool, so look for replacements in the background.
+  if (usable().length < POOL_TARGET / 2) {
+    lastRefresh = 0
+    warm()
+  }
 }
 
 const markSuccess = (proxy: string) => {
@@ -202,12 +302,8 @@ const validate = async (proxy: string) => {
       proxy: await proxyFor(proxy),
       signal: AbortSignal.timeout(VALIDATE_TIMEOUT_MS),
     })
-    if (!response.ok) {
-      await response.body?.cancel()
-      return false
-    }
-    const text = (await response.text()).trim()
-    return /^(?:(?:\d{1,3}\.){3}\d{1,3}|[0-9a-f:]+)$/i.test(text)
+    await response.body?.cancel()
+    return response.ok
   } catch {
     return false
   }
@@ -222,9 +318,9 @@ const validateMany = async (candidates: string[], stop: () => boolean) => {
         if (await validate(proxy)) {
           add(proxy, Date.now())
           debug("validated", proxy)
-        } else {
-          remove(proxy)
         }
+        // A failed probe keeps the entry stale instead of deleting it: a slow or
+        // filtered network must not throw away proxies that work later.
       }
     }),
   )
@@ -249,7 +345,12 @@ const readCache = async () => {
       if (!value || typeof value !== "object") continue
       const proxy = "proxy" in value && typeof value.proxy === "string" ? normalize(value.proxy) : undefined
       const checkedAt = "checkedAt" in value && typeof value.checkedAt === "number" ? value.checkedAt : 0
-      if (proxy) add(proxy, checkedAt)
+      const blockedUntil = "blockedUntil" in value && typeof value.blockedUntil === "number" ? value.blockedUntil : 0
+      if (!proxy) continue
+      add(proxy, checkedAt)
+      // Burned proxies stay cached so a later run skips them instead of retrying.
+      if (blockedUntil > Date.now())
+        failures.set(proxy, { count: FAILURES_BEFORE_BLOCK, blockedUntil })
     }
   } catch {}
 }
@@ -263,7 +364,11 @@ const saveCache = async () => {
       entries: entries
         .toSorted((left, right) => left.checkedAt - right.checkedAt)
         .slice(-POOL_CACHE_LIMIT)
-        .map((entry) => ({ proxy: entry.proxy, checkedAt: entry.checkedAt })),
+        .map((entry) => ({
+          proxy: entry.proxy,
+          checkedAt: entry.checkedAt,
+          blockedUntil: failures.get(entry.proxy)?.blockedUntil ?? 0,
+        })),
     })
     await Bun.write(path, data)
     await chmod(path, 0o600)
@@ -280,7 +385,7 @@ const refresh = async () => {
   const known = new Set(fresh.map((entry) => entry.proxy))
   const discovered = process.env.OPENCODE_PROXY_ONLY === "1" ? [] : await discover()
   const candidates = shuffle(
-    [...stale, ...seeded(), ...discovered].filter((proxy) => {
+    [...stale, ...(await seeded()), ...discovered].filter((proxy) => {
       if (known.has(proxy)) return false
       known.add(proxy)
       return true
@@ -288,7 +393,6 @@ const refresh = async () => {
   ).slice(0, MAX_CANDIDATES)
 
   await validateMany([...fresh.map((entry) => entry.proxy), ...candidates], () => usable().length >= POOL_TARGET)
-  entries = entries.filter((entry) => !blocked(entry.proxy))
   await saveCache()
   debug("pool", usable().length)
 }
@@ -365,7 +469,7 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
   const force = process.env.OPENCODE_PROXY_FORCE === "1"
   warm()
   if (force && !active) {
-    for (const proxy of seeded()) {
+    for (const proxy of await seeded()) {
       if (!(await validate(proxy))) continue
       add(proxy, Date.now())
       active = proxy
@@ -420,7 +524,8 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
         directTried = true
         continue
       }
-      markFailure(selected)
+      if (response.status === 402 || response.status === 429) markQuota(selected, response.status)
+      else markFailure(selected)
       excluded.add(selected)
       if (Date.now() > deadline) break
     } catch (cause) {
