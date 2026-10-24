@@ -31,7 +31,7 @@ const CANDIDATE_CACHE_MS = 30 * 60_000
 const CANDIDATE_CACHE_LIMIT = 20_000
 const ATTEMPT_TIMEOUT_MS = 10_000
 const ROTATION_BUDGET_MS = 30_000
-const MAX_ATTEMPTS = 7
+const MAX_ATTEMPTS = 24
 const FAILURES_BEFORE_BLOCK = 2
 const BLOCK_MS = 10 * 60_000
 // A proxy that already spent the daily free quota stays useless for hours, so it
@@ -130,6 +130,25 @@ const SOURCES: ReadonlyArray<Source> = [
   { url: "https://proxyspace.pro/http.txt", fallback: "http" },
   { url: "https://proxyspace.pro/https.txt", fallback: "https" },
   { url: "https://proxyspace.pro/socks5.txt", fallback: "socks5" },
+  // Sources that publish their own hourly verification and a per-protocol file.
+  { url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/https.txt", fallback: "https" },
+  { url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks4.txt", fallback: "socks4" },
+  { url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks4.txt", fallback: "socks4" },
+  { url: "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/socks4.txt", fallback: "socks4" },
+  { url: "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/all.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/socks4.txt", fallback: "socks4" },
+  { url: "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks4.txt", fallback: "socks4" },
+  { url: "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/saisuiu/Lionkings-Http-Proxys-Proxies/main/cnfree.txt", fallback: "http" },
   { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt", kind: "hideip", fallback: "https" },
   { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt", kind: "hideip", fallback: "http" },
   { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt", kind: "hideip", fallback: "socks4" },
@@ -166,6 +185,9 @@ let entries: Entry[] = []
 let active: string | undefined
 let starting: Promise<void> | undefined
 let lastRefresh = 0
+// The cached pool is the only warm state a fresh standalone process has, so every
+// read path waits for it instead of racing the background refresh.
+let loading: Promise<void> | undefined
 const failures = new Map<string, { count: number; blockedUntil: number }>()
 
 const debug = (...values: unknown[]) => {
@@ -466,8 +488,10 @@ const saveCache = async () => {
   }
 }
 
+const load = () => (loading ??= readCache().catch(() => {}))
+
 const refresh = async () => {
-  await readCache()
+  await load()
   const now = Date.now()
   const fresh = entries.filter((entry) => now - entry.checkedAt < POOL_FRESH_MS)
   const stale = entries.filter((entry) => now - entry.checkedAt >= POOL_FRESH_MS).map((entry) => entry.proxy)
@@ -575,6 +599,7 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
 
   const force = process.env.OPENCODE_PROXY_FORCE === "1"
   warm()
+  await load()
   if (force && !active) {
     for (const proxy of await seeded()) {
       if (!(await validate(proxy))) continue
@@ -594,6 +619,8 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
   let proxyTried = false
   let fallback: FetchResponse | undefined
   let failure: unknown
+  // Always leave a trace: a failed rotation is the one case users need to report.
+  const tried: string[] = []
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const selected = active ?? (!force && !directTried && !proxyTried ? undefined : pick(excluded))
@@ -622,6 +649,7 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
       const remaining = Math.max(1_000, deadline - Date.now())
       debug("attempt", proxy ?? "direct", new URL(target).host)
       const response = await send(input, init, proxy, Math.min(ATTEMPT_TIMEOUT_MS, remaining))
+      tried.push(`${proxy ?? "direct"}=${response.status}`)
       debug("response", proxy ?? "direct", response.status)
       if (!shouldRotate(response.status)) {
         if (selected) markSuccess(selected)
@@ -641,6 +669,7 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
       excluded.add(selected)
       if (Date.now() > deadline) break
     } catch (cause) {
+      tried.push(`${proxy ?? "direct"}=timeout`)
       if (init?.signal?.aborted) throw cause
       failure = cause
       if (!selected) throw cause
@@ -650,7 +679,10 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
     }
   }
 
-  if (fallback) return fallback
+  if (fallback) {
+    console.error(`[proxy-rotator] rotation failed: ${tried.join(" ")}`)
+    return fallback
+  }
   if (failure) throw failure
   return globalThis.fetch(input, init)
 }
