@@ -472,7 +472,10 @@ const saveCache = async () => {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
     const data = JSON.stringify({
       version: 1,
+      // A proxy that answered 402/429 leaves the list: keeping it only wastes an
+      // attempt on the next run, and discovery can offer it again later.
       entries: entries
+        .filter((entry) => (failures.get(entry.proxy)?.blockedUntil ?? 0) <= Date.now())
         .toSorted((left, right) => left.checkedAt - right.checkedAt)
         .slice(-POOL_CACHE_LIMIT)
         .map((entry) => ({
