@@ -42,6 +42,7 @@ test("resolution groups Effect-native lifecycle operations only for the managed 
         pid: process.pid,
       }),
     )
+    process.env.OPENCODE_SERVICE = "1"
     const resolved = await runPromise(ServerConnection.resolve())
 
     expect(resolved.endpoint.url).toBe(server.url.toString())
@@ -55,6 +56,7 @@ test("resolution groups Effect-native lifecycle operations only for the managed 
     expect(explicit.endpoint.url).toBe(server.url.toString())
     expect(explicit.service).toBeUndefined()
   } finally {
+    delete process.env.OPENCODE_SERVICE
     await server.stop(true)
     await fs.rm(root, { recursive: true, force: true })
   }

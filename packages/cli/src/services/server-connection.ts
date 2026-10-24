@@ -43,7 +43,10 @@ export const resolve = Effect.fn("cli.server-connection.resolve")(function* (arg
       )
     return { endpoint } satisfies Resolved
   }
-  if (standalone || (yield* ServiceConfig.read()).disabled === true) {
+  // Fork builds replace the binary far more often than the shared daemon's advertised
+  // version changes, so a background service can outlive the build that started it.
+  // Run a private server by default; OPENCODE_SERVICE=1 opts back into the shared one.
+  if (standalone || process.env.OPENCODE_SERVICE !== "1" || (yield* ServiceConfig.read()).disabled === true) {
     return { endpoint: yield* Standalone.start() } satisfies Resolved
   }
 

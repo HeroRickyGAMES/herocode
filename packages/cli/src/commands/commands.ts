@@ -5,21 +5,21 @@ import { Updater } from "../services/updater"
 
 export const PrintLogs = GlobalFlag.Setting("print-logs")({
   flag: Flag.Boolean("print-logs").pipe(
-    Flag.withDescription("Print logs to stderr (server logs require --standalone)"),
+    Flag.withDescription("Print logs to stderr (includes the private server's logs)"),
     Flag.withDefault(false),
   ),
 })
 
 export const Standalone = GlobalFlag.Setting("standalone")({
   flag: Flag.Boolean("standalone").pipe(
-    Flag.withDescription("Run with a private server instead of the background service"),
+    Flag.withDescription("Run with a private server instead of the background service (default)"),
     Flag.withDefault(false),
   ),
 })
 
 export const Server = GlobalFlag.Setting("server")({
   flag: Flag.String("server").pipe(
-    Flag.withDescription("Connect to a server URL instead of the background service"),
+    Flag.withDescription("Connect to a server URL instead of starting a local server"),
     Flag.optional,
   ),
 })

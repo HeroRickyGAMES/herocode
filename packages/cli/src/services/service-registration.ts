@@ -5,7 +5,7 @@ import path from "node:path"
 import { Effect, FileSystem, Schedule, Schema } from "effect"
 import { HttpServer } from "effect/http"
 import { NetAddress } from "effect/net"
-import { OPENCODE_ADVERTISED_VERSION } from "../version"
+import { OPENCODE_VERSION } from "../version"
 
 const infoJson = Schema.fromJsonString(Service.Info)
 const encodeInfo = Schema.encodeEffect(infoJson)
@@ -23,7 +23,7 @@ export const register = Effect.fnUntraced(function* (options: {
   yield* fs.makeDirectory(path.dirname(options.file), { recursive: true })
   const info = {
     id: options.id,
-    version: OPENCODE_ADVERTISED_VERSION,
+    version: OPENCODE_VERSION,
     url: HttpServer.formatAddress(options.address),
     pid: process.pid,
     password: options.password,
