@@ -22,7 +22,9 @@ const POOL_CACHE_LIMIT = 4096
 const POOL_FRESH_MS = 60 * 60_000
 const REFRESH_MS = 4 * 60_000
 const VALIDATE_TIMEOUT_MS = 6_000
-const VALIDATE_CONCURRENCY = 192
+// Validation shares the network with the request that triggered it, so a wide
+// fan-out starves the real attempt and turns a fast quota error into a timeout.
+const VALIDATE_CONCURRENCY = 24
 const MAX_CANDIDATES = 2500
 // Public lists grow to megabytes. Reading a prefix keeps discovery usable on a
 // slow link, and the candidate cache stops a refresh from downloading them again.
@@ -43,7 +45,9 @@ const THROTTLE_BLOCK_MS = 60 * 60_000
 const DEFAULT_VALIDATION_URL = "https://opencode.ai/"
 
 // OpenCode Zen reports an exhausted free quota as 402 as well as 429, so both rotate.
-const ROTATE_STATUS = new Set([402, 407, 408, 425, 429, 529])
+// 403 is what a filtered exit returns instead of a quota error, so it must rotate
+// as well: keeping the response would surface a proxy block as a model failure.
+const ROTATE_STATUS = new Set([402, 403, 407, 408, 425, 429, 529])
 
 const localHost = (hostname: string) => {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "")
@@ -626,7 +630,11 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
   const tried: string[] = []
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const selected = active ?? (!force && !directTried && !proxyTried ? undefined : pick(excluded))
+    // Spread requests across the pool. Staying on one exit burns that IP's free
+    // quota while the rest of the pool sits idle, so a known-good proxy is only a
+    // fallback when nothing else is available.
+    const sticky = active && !excluded.has(active) && !blocked(active) ? active : undefined
+    const selected = !force && !directTried && !proxyTried ? undefined : pick(excluded) ?? sticky
     if (!selected && (force || directTried || proxyTried)) {
       // The pool validates in the background, so a limited request waits for the
       // first proxy instead of failing with the direct quota error.
@@ -675,7 +683,14 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
       tried.push(`${proxy ?? "direct"}=timeout`)
       if (init?.signal?.aborted) throw cause
       failure = cause
-      if (!selected) throw cause
+      // A direct network failure is still worth a proxy attempt, but only when the
+      // pool holds one; otherwise the same error must surface without delay.
+      if (!selected) {
+        // Fall through to the pool: a direct timeout often means the exit is
+        // filtered while a proxy still reaches the endpoint.
+        directTried = true
+        continue
+      }
       markFailure(selected)
       excluded.add(selected)
       if (Date.now() > deadline) break
