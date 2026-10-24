@@ -319,7 +319,10 @@ const waitForProxy = async (timeout: number, exclude: Set<string>) => {
   }
 }
 
-const replayable = (init: FetchInit | undefined) => {
+const replayable = (input: FetchInput, init: FetchInit | undefined) => {
+  // Effect hands the executor a Request with a body stream. Cloning keeps the
+  // original unconsumed so a rate-limited POST can be replayed through a proxy.
+  if (input instanceof Request) return !input.bodyUsed
   const body = init?.body
   return (
     body === undefined ||
@@ -339,10 +342,12 @@ const send = (
   proxy: string | undefined,
   timeoutMs = ATTEMPT_TIMEOUT_MS,
 ) => {
-  if (!proxy) return globalThis.fetch(input, init)
+  // Clone even the direct attempt: the original stays unconsumed for a retry.
+  const request: FetchInput = input instanceof Request ? (input.clone() as FetchInput) : input
+  if (!proxy) return globalThis.fetch(request, init)
   const external = init?.signal ?? (input instanceof Request ? input.signal : undefined)
   const timeout = AbortSignal.timeout(timeoutMs)
-  return globalThis.fetch(input, {
+  return globalThis.fetch(request, {
     ...init,
     proxy,
     signal: external ? AbortSignal.any([external, timeout]) : timeout,
@@ -366,7 +371,7 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
       break
     }
   }
-  const canRetry = replayable(init) && !(input instanceof Request && input.body !== null)
+  const canRetry = replayable(input, init)
   const excluded = new Set<string>()
   const deadline = Date.now() + ROTATION_BUDGET_MS
   let directTried = false
