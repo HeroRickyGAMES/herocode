@@ -4,12 +4,17 @@ import { run } from "@opencode/tui"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { Config } from "../../config"
-import { Context, Effect, FileSystem, Option, Queue, Schedule, Semaphore } from "effect"
+import { Context, Effect, FileSystem, Option, Queue, Semaphore } from "effect"
 import { ServerConnection } from "../../services/server-connection"
 import { Updater } from "../../services/updater"
 import { UpdatePreflight } from "../../services/update-preflight"
 import { Npm } from "@opencode/util/npm"
-import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_HIGHLIGHTS, OPENCODE_VERSION } from "../../version"
+import {
+  OPENCODE_ADVERTISED_VERSION,
+  OPENCODE_ARTIFACT,
+  OPENCODE_CHANNEL,
+  OPENCODE_HIGHLIGHTS,
+} from "../../version"
 import { Env } from "../../env"
 import { Service } from "@opencode/client/effect/service"
 import { OpenCode } from "@opencode/client/promise"
@@ -60,30 +65,8 @@ export default Runtime.handler(Commands, (input) =>
         catch: (cause) => new Error(errorMessage(cause)),
       })) !== undefined
     const updater = yield* Updater.Service
-    let installing: string | undefined
-    let latest: Updater.RunResult | undefined
-    const installListeners = new Set<(version: string) => void>()
-    const resultListeners = new Set<(result: Updater.RunResult) => void>()
-    // Background checks, `/update` lookups, and manual installs take turns so two installs never overlap.
+    // `/update` lookups and manual installs take turns so two installs never overlap.
     const checking = yield* Semaphore.make(1)
-    yield* updater
-      .run((version) => {
-        installing = version
-        installListeners.forEach((notify) => notify(version))
-      })
-      .pipe(
-        Effect.ensuring(Effect.sync(() => (installing = undefined))),
-        Effect.tap((result) =>
-          Effect.sync(() => {
-            if (!result || (result.type === latest?.type && result.version === latest.version)) return
-            latest = result
-            resultListeners.forEach((notify) => notify(result))
-          }),
-        ),
-        checking.withPermits(1),
-        Effect.repeat(Schedule.spaced("10 minutes")),
-        Effect.forkScoped({ startImmediately: true }),
-      )
     preflight.loading()
     const config = yield* Config.Service
     const npm = yield* Npm.Service
@@ -96,7 +79,7 @@ export default Runtime.handler(Commands, (input) =>
     yield* run({
       app: {
         name: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
-        version: OPENCODE_VERSION,
+        version: OPENCODE_ADVERTISED_VERSION,
         channel: process.env.OPENCODE_TUI_CHANNEL ?? OPENCODE_CHANNEL,
         highlights: OPENCODE_HIGHLIGHTS,
       },
@@ -123,18 +106,8 @@ export default Runtime.handler(Commands, (input) =>
       },
       updater: {
         remote: requestedServer !== undefined,
-        subscribe: (notify) => {
-          if (latest) notify(latest)
-          resultListeners.add(notify)
-          return () => resultListeners.delete(notify)
-        },
-        check: (signal, notify) => {
-          if (installing) notify(installing)
-          installListeners.add(notify)
-          return runPromise(checking.withPermits(1)(updater.check()), { signal }).finally(() =>
-            installListeners.delete(notify),
-          )
-        },
+        subscribe: () => () => undefined,
+        check: (signal) => runPromise(checking.withPermits(1)(updater.check()), { signal }),
         apply: (version) => runPromise(checking.withPermits(1)(updater.apply(version))),
       },
       packages: {

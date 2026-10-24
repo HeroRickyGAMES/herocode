@@ -4,7 +4,7 @@ import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
-import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_VERSION } from "./version"
+import { OPENCODE_ADVERTISED_VERSION, OPENCODE_ARTIFACT, OPENCODE_CHANNEL } from "./version"
 import { AppProcess } from "@opencode/util/process"
 import { randomBytes, randomUUID } from "node:crypto"
 import { Effect, Option, Redacted, Schema } from "effect"
@@ -101,7 +101,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
         {
           app: {
             name: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
-            version: OPENCODE_VERSION,
+            version: OPENCODE_ADVERTISED_VERSION,
             channel: OPENCODE_CHANNEL,
           },
           hostname,

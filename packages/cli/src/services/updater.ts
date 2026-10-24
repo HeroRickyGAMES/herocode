@@ -106,7 +106,6 @@ function resultDetail(result: { code: number; stdout: string; stderr: string }) 
 }
 
 export interface Interface {
-  readonly run: (onInstall?: (version: string) => void) => Effect.Effect<RunResult | undefined>
   readonly check: () => Effect.Effect<CheckResult | undefined, Error>
   readonly apply: (version: string) => Effect.Effect<void, Error>
   readonly method: () => Effect.Effect<Method | undefined>
@@ -530,36 +529,6 @@ const make = Effect.gen(function* () {
     )
   })
 
-  const inspect = Effect.fnUntraced(function* () {
-    if (OPENCODE_LOCAL || ["1", "true"].includes(process.env.OPENCODE_DISABLE_AUTOUPDATE?.toLowerCase() ?? "")) {
-      yield* Effect.logInfo("update check skipped", {
-        reason: OPENCODE_LOCAL ? "local-install" : "disabled",
-        version: OPENCODE_VERSION,
-        channel: OPENCODE_CHANNEL,
-      })
-      return undefined
-    }
-    const policy = yield* readPolicy()
-    if (policy === "disable") {
-      yield* Effect.logInfo("update check skipped", { reason: "policy-disabled" })
-      return undefined
-    }
-
-    const current = yield* Ref.get(installedVersion)
-    const version = yield* latest()
-    yield* Effect.logInfo("update check", {
-      current,
-      latest: version,
-    })
-    const next = action(current, version, policy)
-    if (next === "none") {
-      yield* Effect.logInfo("update check done", { action: "up-to-date" })
-      return undefined
-    }
-    yield* Effect.logInfo("OpenCode update available", { current, latest: version, action: next })
-    return { policy, version }
-  })
-
   const install = Effect.fnUntraced(function* (version: string) {
     const detected = yield* method()
     if (!detected) {
@@ -588,6 +557,12 @@ const make = Effect.gen(function* () {
         type: "unavailable" as const,
         message: "This build runs from a source checkout. Use an installed OpenCode release to check for updates.",
       }
+    const policy = yield* readPolicy()
+    if (policy === "disable")
+      return {
+        type: "unavailable" as const,
+        message: "Updates are disabled in the configuration. Set `update` to `notify` or `auto` to check for updates.",
+      }
     const detected = yield* method()
     if (!detected)
       return {
@@ -607,19 +582,7 @@ const make = Effect.gen(function* () {
     return { type: "available" as const, version }
   })
 
-  const run = Effect.fn("cli.updater.run")(
-    function* (onInstall: (version: string) => void = () => {}) {
-      const result = yield* inspect()
-      if (!result) return undefined
-      if (result.policy === "notify") return { type: "available" as const, version: result.version }
-      onInstall(result.version)
-      if (!(yield* install(result.version))) return yield* Effect.fail(new Error("Installation method not found"))
-      return { type: "installed" as const, version: result.version }
-    },
-    Effect.catch((error) => Effect.logWarning("update check failed", { error }).pipe(Effect.as(undefined))),
-  )
-
-  return Service.of({ run, check, apply, method, latest, upgrade, removal })
+  return Service.of({ check, apply, method, latest, upgrade, removal })
 })
 
 export const layer = Layer.effect(Service, make)
