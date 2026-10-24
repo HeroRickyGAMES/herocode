@@ -9,7 +9,7 @@ describe("proxy rotator", () => {
   })
 
   test("rejects unsupported or incomplete entries", () => {
-    expect(ProxyRotator.normalize("socks4://127.0.0.1:1080")).toBeUndefined()
+    expect(ProxyRotator.normalize("socks4://127.0.0.1:1080")).toBe("socks4://127.0.0.1:1080")
     expect(ProxyRotator.normalize("127.0.0.1")).toBeUndefined()
     expect(ProxyRotator.normalize("# comment")).toBeUndefined()
     expect(ProxyRotator.normalize("127.0.0.1:70000")).toBeUndefined()

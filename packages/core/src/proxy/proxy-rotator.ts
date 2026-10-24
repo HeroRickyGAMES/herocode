@@ -17,15 +17,20 @@ interface Entry {
   checkedAt: number
 }
 
-const POOL_TARGET = 64
-const POOL_CACHE_LIMIT = 512
+const POOL_TARGET = 256
+const POOL_CACHE_LIMIT = 4096
 const POOL_FRESH_MS = 60 * 60_000
 const REFRESH_MS = 4 * 60_000
-const VALIDATE_TIMEOUT_MS = 12_000
-const VALIDATE_CONCURRENCY = 48
-const MAX_CANDIDATES = 400
-const ATTEMPT_TIMEOUT_MS = 20_000
-const ROTATION_BUDGET_MS = 60_000
+const VALIDATE_TIMEOUT_MS = 8_000
+const VALIDATE_CONCURRENCY = 96
+const MAX_CANDIDATES = 2500
+// Public lists grow to megabytes. Reading a prefix keeps discovery usable on a
+// slow link, and the candidate cache stops a refresh from downloading them again.
+const SOURCE_MAX_BYTES = 512 * 1024
+const CANDIDATE_CACHE_MS = 30 * 60_000
+const CANDIDATE_CACHE_LIMIT = 20_000
+const ATTEMPT_TIMEOUT_MS = 10_000
+const ROTATION_BUDGET_MS = 30_000
 const MAX_ATTEMPTS = 7
 const FAILURES_BEFORE_BLOCK = 2
 const BLOCK_MS = 10 * 60_000
@@ -64,7 +69,10 @@ type Source = {
 }
 
 const SOURCES: ReadonlyArray<Source> = [
+  // Mirrored GitHub lists, one `host:port` per line.
   { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/https.txt", fallback: "https" },
+  { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt", fallback: "socks4" },
   { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt", fallback: "http" },
   {
@@ -72,27 +80,59 @@ const SOURCES: ReadonlyArray<Source> = [
     fallback: "https",
   },
   {
+    url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks4/data.txt",
+    fallback: "socks4",
+  },
+  {
     url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
     fallback: "socks5",
   },
   { url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt", fallback: "socks4" },
   { url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks4.txt", fallback: "socks4" },
   { url: "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt", fallback: "http" },
   { url: "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt", fallback: "socks4" },
   { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt", fallback: "http" },
   { url: "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt", fallback: "socks4" },
   { url: "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks4.txt", fallback: "socks4" },
   { url: "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt", fallback: "http" },
   { url: "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt", fallback: "https" },
+  { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks4.txt", fallback: "socks4" },
+  { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/HTTP.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/SOCKS5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt", fallback: "socks5" },
+  { url: "https://raw.githubusercontent.com/themiralay/Proxy-List-World/master/data.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt", fallback: "http" },
+  { url: "https://api.openproxylist.xyz/http.txt", fallback: "http" },
+  { url: "https://api.openproxylist.xyz/https.txt", fallback: "https" },
+  { url: "https://api.openproxylist.xyz/socks4.txt", fallback: "socks4" },
+  { url: "https://api.openproxylist.xyz/socks5.txt", fallback: "socks5" },
+  { url: "https://proxyspace.pro/http.txt", fallback: "http" },
+  { url: "https://proxyspace.pro/https.txt", fallback: "https" },
+  { url: "https://proxyspace.pro/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt", kind: "hideip", fallback: "https" },
   { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt", kind: "hideip", fallback: "http" },
+  { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt", kind: "hideip", fallback: "socks4" },
   { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt", kind: "hideip", fallback: "socks5" },
   {
     url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text",
@@ -103,13 +143,18 @@ const SOURCES: ReadonlyArray<Source> = [
     fallback: "https",
   },
   {
+    url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks4&proxy_format=ipport&format=text",
+    fallback: "socks4",
+  },
+  {
     url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text",
     fallback: "socks5",
   },
   { url: "https://advanced.name/freeproxy?type=http", kind: "advanced", fallback: "http" },
   { url: "https://advanced.name/freeproxy?type=https", kind: "advanced", fallback: "https" },
+  { url: "https://advanced.name/freeproxy?type=socks4", kind: "advanced", fallback: "socks4" },
   { url: "https://advanced.name/freeproxy?type=socks5", kind: "advanced", fallback: "socks5" },
-  ...["http,https", "socks5"].flatMap((protocols) =>
+  ...["http,https", "socks4", "socks5"].flatMap((protocols) =>
     [1, 2, 3].map((page) => ({
       url: `https://proxylist.geonode.com/api/proxy-list?limit=500&page=${page}&sort_by=lastChecked&sort_type=desc&protocols=${protocols}`,
       kind: "geonode" as const,
@@ -139,10 +184,12 @@ export const normalize = (value: string, fallback = "http"): string | undefined 
   if (!explicitScheme && !/:\d{1,5}$/.test(raw)) return
   const withScheme = explicitScheme ? raw : `${fallback}://${raw}`
   const url = URL.canParse(withScheme) ? new URL(withScheme) : undefined
-  if (!url || !url.hostname) return
+  // Lists pad their output with unroutable placeholders such as 0.0.0.0.
+  if (!url || !url.hostname || url.hostname === "0.0.0.0") return
   if (
     url.protocol !== "http:" &&
     url.protocol !== "https:" &&
+    url.protocol !== "socks4:" &&
     url.protocol !== "socks5:" &&
     url.protocol !== "socks5h:"
   )
@@ -169,12 +216,22 @@ const seeded = async () => {
 }
 
 const fetchText = async (url: string) => {
-  const response = await globalThis.fetch(url, { signal: AbortSignal.timeout(10_000) })
-  if (!response.ok) {
+  const response = await globalThis.fetch(url, { signal: AbortSignal.timeout(15_000) })
+  if (!response.ok || !response.body) {
     await response.body?.cancel()
     return
   }
-  return response.text()
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  while (size < SOURCE_MAX_BYTES) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(value)
+    size += value.byteLength
+  }
+  await reader.cancel().catch(() => {})
+  return Buffer.concat(chunks).subarray(0, SOURCE_MAX_BYTES).toString("utf8")
 }
 
 // hideip.me writes `host:port:Country`, so the country suffix must be dropped.
@@ -292,7 +349,8 @@ const markSuccess = (proxy: string) => {
 
 const proxyFor = (proxy: string) => {
   const url = new URL(proxy)
-  if (url.protocol === "socks5:" || url.protocol === "socks5h:") return SocksBridge.httpProxy(proxy)
+  if (url.protocol === "socks4:" || url.protocol === "socks5:" || url.protocol === "socks5h:")
+    return SocksBridge.httpProxy(proxy)
   return proxy
 }
 
@@ -334,6 +392,37 @@ const shuffle = <A>(values: A[]) => {
     values[target] = value
   }
   return values
+}
+
+const candidatePath = () => {
+  const root = process.env.XDG_CACHE_HOME || join(homedir(), ".cache")
+  return join(root, "opencode", "proxy-candidates.json")
+}
+
+const readCandidates = async () => {
+  try {
+    const data: unknown = JSON.parse(await Bun.file(candidatePath()).text())
+    if (!data || typeof data !== "object") return
+    if (!("savedAt" in data) || typeof data.savedAt !== "number") return
+    if (!("proxies" in data) || !Array.isArray(data.proxies)) return
+    const proxies = data.proxies.flatMap((value) => {
+      if (typeof value !== "string") return []
+      const proxy = normalize(value)
+      return proxy ? [proxy] : []
+    })
+    return { savedAt: data.savedAt, proxies }
+  } catch {}
+}
+
+const saveCandidates = async (proxies: string[]) => {
+  const path = candidatePath()
+  try {
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+    await Bun.write(path, JSON.stringify({ savedAt: Date.now(), proxies: proxies.slice(0, CANDIDATE_CACHE_LIMIT) }))
+    await chmod(path, 0o600)
+  } catch (cause) {
+    debug("candidate cache write failed", cause)
+  }
 }
 
 const readCache = async () => {
@@ -383,7 +472,10 @@ const refresh = async () => {
   const fresh = entries.filter((entry) => now - entry.checkedAt < POOL_FRESH_MS)
   const stale = entries.filter((entry) => now - entry.checkedAt >= POOL_FRESH_MS).map((entry) => entry.proxy)
   const known = new Set(fresh.map((entry) => entry.proxy))
-  const discovered = process.env.OPENCODE_PROXY_ONLY === "1" ? [] : await discover()
+  const cached = await readCandidates()
+  const reuse = process.env.OPENCODE_PROXY_ONLY !== "1" && cached && now - cached.savedAt < CANDIDATE_CACHE_MS
+  const discovered = reuse ? cached.proxies : process.env.OPENCODE_PROXY_ONLY === "1" ? [] : await discover()
+  if (!reuse && discovered.length > 0) void saveCandidates(discovered)
   const candidates = shuffle(
     [...stale, ...(await seeded()), ...discovered].filter((proxy) => {
       if (known.has(proxy)) return false
@@ -410,7 +502,10 @@ export const warm = () => {
 }
 
 const pick = (exclude: Set<string>) => {
-  const list = usable().filter((entry) => !exclude.has(entry.proxy))
+  const fresh = usable().filter((entry) => !exclude.has(entry.proxy))
+  // A stale entry only lost its freshness stamp, so it is still worth an attempt
+  // instead of waiting for a revalidation that the slow network delays.
+  const list = fresh.length > 0 ? fresh : entries.filter((entry) => !blocked(entry.proxy) && !exclude.has(entry.proxy))
   if (list.length === 0) return
   return list[Math.floor(Math.random() * list.length)].proxy
 }
@@ -489,7 +584,7 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
     if (!selected && (force || directTried || proxyTried)) {
       // The pool validates in the background, so a limited request waits for the
       // first proxy instead of failing with the direct quota error.
-      const proxy = await waitForProxy(Math.min(30_000, Math.max(0, deadline - Date.now())), excluded)
+      const proxy = await waitForProxy(Math.min(10_000, Math.max(0, deadline - Date.now())), excluded)
       if (!proxy) break
       continue
     }

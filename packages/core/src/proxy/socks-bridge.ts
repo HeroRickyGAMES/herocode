@@ -10,7 +10,8 @@ interface State {
   readonly client: Bun.Socket<State>
   readonly hostname: string
   readonly port: number
-  stage: "http" | "greeting" | "auth" | "connect" | "tunnel"
+  readonly version: 4 | 5
+  stage: "http" | "greeting" | "auth" | "connect" | "connect4" | "tunnel"
   clientBuffer: Buffer
   upstreamBuffer: Buffer
   upstream?: Bun.Socket<undefined>
@@ -29,8 +30,11 @@ const debug = (...values: unknown[]) => {
 
 const parseSocks = (value: string) => {
   const url = new URL(value)
-  if (url.protocol !== "socks5:" && url.protocol !== "socks5h:") return
+  const version: 4 | 5 | undefined =
+    url.protocol === "socks4:" ? 4 : url.protocol === "socks5:" || url.protocol === "socks5h:" ? 5 : undefined
+  if (!version) return
   return {
+    version,
     hostname: url.hostname.replace(/^\[|\]$/g, ""),
     port: Number(url.port || 1080),
   }
@@ -38,6 +42,16 @@ const parseSocks = (value: string) => {
 
 const writeBuffer = <Data>(socket: Bun.Socket<Data>, data: Buffer) =>
   socket.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
+
+// SOCKS4a carries the destination name after a 0.0.0.1 address, so the proxy
+// resolves opencode.ai instead of requiring a local DNS answer.
+const socks4ConnectRequest = (hostname: string, port: number) =>
+  Buffer.concat([
+    Buffer.from([4, 1, (port >> 8) & 0xff, port & 0xff, 0, 0, 0, 1]),
+    Buffer.from([0]),
+    Buffer.from(hostname.replace(/^\[|\]$/g, "")),
+    Buffer.from([0]),
+  ])
 
 const socksConnectRequest = (hostname: string, port: number) => {
   const name = Buffer.from(hostname.replace(/^\[|\]$/g, ""))
@@ -64,6 +78,11 @@ const openTunnel = async (
     port: state.port,
     socket: {
       open(socket) {
+        if (state.version === 4) {
+          state.stage = "connect4"
+          writeBuffer(socket, socks4ConnectRequest(hostname, port))
+          return
+        }
         writeBuffer(socket, greeting)
       },
       data(socket, data) {
@@ -122,6 +141,24 @@ const openTunnel = async (
           writeBuffer(socket, request)
         }
 
+        if (state.stage === "connect4") {
+          if (state.upstreamBuffer.length < 8) return
+          const accepted = state.upstreamBuffer[1] === 0x5a
+          state.upstreamBuffer = Buffer.alloc(0)
+          if (!accepted) {
+            state.client.end()
+            return
+          }
+          state.stage = "tunnel"
+          debug("tunnel", hostname, port)
+          state.client.write("HTTP/1.1 200 Connection Established\r\n\r\n")
+          if (state.clientBuffer.length) {
+            writeBuffer(socket, state.clientBuffer)
+            state.clientBuffer = Buffer.alloc(0)
+          }
+          return
+        }
+
         if (state.stage === "connect") {
           if (state.upstreamBuffer.length < 5) return
           if (state.upstreamBuffer[0] !== 5 || state.upstreamBuffer[1] !== 0) {
@@ -157,7 +194,12 @@ const openTunnel = async (
   state.upstream = upstream
 }
 
-const listen = (hostname: string, port: number, credentials: { username: string; password: string } | undefined) => {
+const listen = (
+  version: 4 | 5,
+  hostname: string,
+  port: number,
+  credentials: { username: string; password: string } | undefined,
+) => {
   const server = Bun.listen<State>({
     hostname: "127.0.0.1",
     port: 0,
@@ -165,6 +207,7 @@ const listen = (hostname: string, port: number, credentials: { username: string;
       open(socket) {
         socket.data = {
           client: socket,
+          version,
           hostname,
           port,
           stage: "http",
@@ -230,7 +273,7 @@ export const httpProxy = (proxy: string) => {
     const url = new URL(proxy)
     const username = decodeURIComponent(url.username)
     const password = decodeURIComponent(url.password)
-    return listen(parsed.hostname, parsed.port, username ? { username, password } : undefined)
+    return listen(parsed.version, parsed.hostname, parsed.port, username ? { username, password } : undefined)
   })
   bridges.set(proxy, bridge)
   void bridge.then((url) => {
