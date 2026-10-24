@@ -21,8 +21,8 @@ const POOL_TARGET = 256
 const POOL_CACHE_LIMIT = 4096
 const POOL_FRESH_MS = 60 * 60_000
 const REFRESH_MS = 4 * 60_000
-const VALIDATE_TIMEOUT_MS = 8_000
-const VALIDATE_CONCURRENCY = 96
+const VALIDATE_TIMEOUT_MS = 6_000
+const VALIDATE_CONCURRENCY = 192
 const MAX_CANDIDATES = 2500
 // Public lists grow to megabytes. Reading a prefix keeps discovery usable on a
 // slow link, and the candidate cache stops a refresh from downloading them again.
@@ -536,6 +536,18 @@ const replayable = (input: FetchInput, init: FetchInit | undefined) => {
   )
 }
 
+// A streamed body cannot be replayed, so buffer it once: rotation must not depend
+// on how the caller happened to hand over the request payload.
+const prepareBody = async (input: FetchInput, init: FetchInit | undefined) => {
+  if (init?.body instanceof ReadableStream)
+    return {
+      input,
+      init: { ...init, body: await new Response(init.body).arrayBuffer() },
+      canRetry: true,
+    }
+  return { input, init, canRetry: replayable(input, init) }
+}
+
 const send = (
   input: FetchInput,
   init: FetchInit | undefined,
@@ -571,7 +583,11 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
       break
     }
   }
-  const canRetry = replayable(input, init)
+  const prepared = await prepareBody(input, init)
+  const canRetry = prepared.canRetry
+  input = prepared.input
+  init = prepared.init
+  debug("replayable", canRetry)
   const excluded = new Set<string>()
   const deadline = Date.now() + ROTATION_BUDGET_MS
   let directTried = false
@@ -604,6 +620,7 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
 
     try {
       const remaining = Math.max(1_000, deadline - Date.now())
+      debug("attempt", proxy ?? "direct", new URL(target).host)
       const response = await send(input, init, proxy, Math.min(ATTEMPT_TIMEOUT_MS, remaining))
       debug("response", proxy ?? "direct", response.status)
       if (!shouldRotate(response.status)) {
