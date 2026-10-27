@@ -53,7 +53,7 @@ Status que **obrigam rotação** (nunca voltam pro caller como free-limit):
 
 ## Discovery e pool
 
-Fontes públicas (`SOURCES`): conjunto enxuto (hookzof, hproxy http/https/socks4, ProxyScraper socks, rdavydov, ProxyScrape http/https/socks4, Geonode). Famílias que o log/EXPUNGE mataram (monosans, vakhov, hideip, TheSpeedX, proxifly, iplocate, proxyscrape socks5, …) saem do array e ficam em `HARD_PURGED`.
+Fontes públicas (`SOURCES`): conjunto enxuto (hookzof, hproxy http/https/socks4, ProxyScraper socks, rdavydov, ProxyScrape http/https/socks4). Geonode e megadumps (monosans, hideip, TheSpeedX, proxifly, …) em `HARD_PURGED`.
 
 1. Download (prefixo até 512 KiB) → parse → candidatos.
 2. Candidatos intercalados **por source** (round-robin) até 2500 — senão a 1ª lista (ex.: hookzof) engolia o budget e o warm ocioso parecia monofonte.
@@ -71,15 +71,13 @@ Cada proxy carrega uma **source** legível:
 
 ### Yield por source
 
-Contadores `ok` / `bad` por lista (path completo, não só o host). **Só POST/sticky** — validate não mexe em yield (nem `ok` nem `bad`). Contar invalid como `bad` EXPURGOU todas as fontes restantes após ~8 dials e deixou `pool 0`.
+Contadores `ok` / `bad` / `quota` por lista. Validate não mexe em yield.
 
-- Sticky / POST ok → `ok`; quota/dead/failure no POST → `bad`.
-- ≥ 5 amostras e ≥ 80% `bad` → **toxic**: discovery e pick pulam.
-- Expunge permanente: `0 ok` + ≥ 8 `bad` (POST), ou ≥ 85% `bad` com ≥ 16 amostras.
-- Cache `yieldVersion < 3` descarta yields/`purged` runtime (mantém só `HARD_PURGED`).
-- Geonode usa `protocols=` no label (antes todas as pages viravam um balde só).
-- Megadumps (TheSpeedX, proxifly, hideip, monosans, …) em `HARD_PURGED_SOURCES`.
-- Label legado só-host (`raw.githubusercontent.com`) **nunca** fica toxic.
+- Sticky → `ok`; tunnel morto → `bad` (pode expurgar); free-tier 429 → `quota` (**não** expurga a lista).
+- Budget default de hunt: **90 s** (abaixo do headerTimeout de 5 min). `OPENCODE_PROXY_BUDGET_MS` sobrescreve.
+- Expunge só com mortes de túnel: `0 ok` + ≥ 8 `bad`, ou ≥ 85% `bad` com ≥ 16.
+- Cache `yieldVersion < 4` descarta yields/`purged` runtime (429 tinha deletado hookzof/hproxy).
+- Label legado só-host **nunca** fica toxic.
 
 ## Cache em disco
 
@@ -98,9 +96,19 @@ Exits queimados **permanecem** no pool com `blockedUntil`, para o próximo resta
 |---|---|---|
 | Tentativa via proxy | **10 s** | Timer duro + AbortController (Bun às vezes ignora AbortSignal em proxy/SOCKS) |
 | Probe GET | 6 s | Filtra mortos antes do POST |
-| Budget de rotação | **3 min** | Teto do hunt; pool vazio após falhas reais só espera **8 s** |
-| Pool vazio (já tentou) | **8 s** | Evita freeze de minutos antes de `rotation exhausted` |
-| AI `headerTimeout` | 5 min | Se o rotator não devolver a tempo → “Timed out waiting for response headers” |
+| Budget de rotação | **240 s** | Teto do hunt (abaixo dos 5 min de headerTimeout) |
+| POST race | só probe-alive | não enche com bag sem probe (`alive:1` ≠ race 12); soft só pré-429 |
+| SOCKS ports | filtrados | `:1080/:4145/:4153/:5678` como `http://` saem do pickable/cache |
+| Fontes | quality-first | residential / fast / elite / país (id,br,ph,…) antes do dump |
+| EXPUNGE runtime | off | Free list `bad` ≠ lista morta; só HARD_PURGED remove fonte |
+| Candidate cache | **8 min** | Listas republicam ~1–5 min; 30 min reciclava /24 queimado |
+| Pool fresh | **6 h** | Cache >1h ainda entra no hunt |
+| Throttle 429 | **3 min** | Soft; daily 402/FreeUsageLimitError continua 6 h |
+| Fontes extra | relayglass + xyzs996 | Listas health-checked (~5 min) |
+| Pool advances | **24** | Gerações de 429 sem desistir cedo |
+| Retire | só exits tentados | Não queima a lista inteira nem pausa discover 10 min |
+| Pool vazio (já tentou) | **8 s** | Evita freeze longo antes de `rotation exhausted` |
+| AI `headerTimeout` | 5 min | Outer timeout; o rotator deve terminar antes |
 
 Hang em headers → `markDead` **antes** de relançar abort externo, para o retry da session não reediscar o mesmo sticky.
 

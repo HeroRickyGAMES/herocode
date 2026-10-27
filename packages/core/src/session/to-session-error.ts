@@ -47,7 +47,11 @@ export function toSessionError(cause: unknown): SessionError.Error {
       case "Transport":
         // Mid-stream proxy drops (ECONNRESET) happen after sticky is pinned. Drop
         // the sticky so the automatic session retry does not dial the same dead exit.
-        if (/ECONNRESET|ECONNREFUSED|EPIPE|socket connection was closed|other side closed|terminated|fetch failed/i.test(cause.message))
+        if (
+          /ECONNRESET|ECONNREFUSED|EPROTO|EHOSTUNREACH|ENETUNREACH|TLS handshake|speak TLS|EPIPE|socket connection was closed|other side closed|terminated|fetch failed/i.test(
+            cause.message,
+          )
+        )
           ProxyRotator.invalidateActive()
         return providerError("provider.transport", cause.reason)
       case "ProviderInternal":

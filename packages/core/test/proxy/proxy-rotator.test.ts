@@ -5,7 +5,9 @@ describe("proxy rotator", () => {
   test("normalizes bare and explicit proxy entries", () => {
     expect(ProxyRotator.normalize("127.0.0.1:8080")).toBe("http://127.0.0.1:8080")
     expect(ProxyRotator.normalize("socks5://127.0.0.1:1080")).toBe("socks5://127.0.0.1:1080")
-    expect(ProxyRotator.normalize("https://user:pass@example.com:443")).toBe("https://user:pass@example.com:443")
+    // Free "https proxy" lists are CONNECT proxies — never TLS-to-the-proxy.
+    expect(ProxyRotator.normalize("127.0.0.1:8080", "https")).toBe("http://127.0.0.1:8080")
+    expect(ProxyRotator.normalize("https://user:pass@example.com:443")).toBe("http://user:pass@example.com:443")
   })
 
   test("rejects unsupported or incomplete entries", () => {
@@ -38,6 +40,11 @@ describe("proxy rotator", () => {
         "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text",
       ),
     ).toBe("api.proxyscrape.com/v4/free-proxy-list/get?socks5")
+    expect(
+      ProxyRotator.sourceLabel(
+        "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text&anonymity=elite&timeout=5000",
+      ),
+    ).toBe("api.proxyscrape.com/v4/free-proxy-list/get?http&elite")
     expect(
       ProxyRotator.sourceLabel(
         "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=socks5",
@@ -76,5 +83,6 @@ describe("proxy rotator", () => {
     expect(ProxyRotator.status().purged).toContain("raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt")
     expect(ProxyRotator.status().purged).toContain("raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt")
     expect(ProxyRotator.status().purged).toContain("api.proxyscrape.com/v4/free-proxy-list/get?socks5")
+    expect(ProxyRotator.status().purged).toContain("raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt")
   })
 })
