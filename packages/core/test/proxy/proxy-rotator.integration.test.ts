@@ -6,16 +6,21 @@ import { Effect } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/http"
 import { AppNodeBuilder } from "../../src/effect/app-node-builder.js"
 import { LayerNodePlatform } from "../../src/effect/app-node-platform.js"
+import { ProxyRotator } from "../../src/proxy/proxy-rotator.js"
 import * as SocksBridge from "../../src/proxy/socks-bridge.js"
 
 test("rotates a rate-limited request through the configured proxy", async () => {
+  ProxyRotator.reset()
   let direct = 0
   let proxied = 0
+  let limited = false
   const origin = Bun.serve({
     port: 0,
     fetch(request) {
+      // The rotator probes with a GET before spending the real POST, so only count
+      // the request that actually carries the body.
       if (request.headers.get("x-proxied")) {
-        proxied++
+        if (request.method === "POST") proxied++
         return new Response(request.body)
       }
       direct++
@@ -29,6 +34,7 @@ test("rotates a rate-limited request through the configured proxy", async () => 
   const proxy = Bun.serve({
     port: 0,
     async fetch(request) {
+      if (limited) return new Response('{"error":{"type":"FreeUsageLimitError"}}', { status: 429 })
       if (request.method === "CONNECT") return new Response("unsupported", { status: 405 })
       const headers = new Headers(request.headers)
       headers.delete("host")
@@ -45,6 +51,7 @@ test("rotates a rate-limited request through the configured proxy", async () => 
     OPENCODE_PROXY_VALIDATE_URL: `http://127.0.0.1:${validator.port}`,
     OPENCODE_PROXY_FORCE: undefined,
     OPENCODE_PROXY_LOCAL: "1",
+    OPENCODE_PROXY_BUDGET_MS: "1500",
   }
   const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]))
   Object.assign(process.env, environment)
@@ -63,6 +70,13 @@ test("rotates a rate-limited request through the configured proxy", async () => 
     expect(body).toBe('{"hello":"world"}')
     expect(direct).toBe(1)
     expect(proxied).toBe(1)
+
+    // A limited proxy is discarded and the exhausted rotation must surface as a
+    // rotation failure, never as the provider's quota response.
+    limited = true
+    await expect(
+      ProxyRotator.fetch(`http://127.0.0.1:${origin.port}/completion`, { method: "POST", body: "{}" }),
+    ).rejects.toThrow(/rotation exhausted/i)
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]
@@ -74,3 +88,73 @@ test("rotates a rate-limited request through the configured proxy", async () => 
     SocksBridge.stop()
   }
 })
+
+test(
+  "times out a proxy that hangs on response headers instead of freezing the chat",
+  async () => {
+    ProxyRotator.reset()
+    const origin = Bun.serve({
+      port: 0,
+      fetch(request) {
+        // Probes use GET and must look reachable so the hanging exit is selected
+        // for the real POST — that is the ProviderHeaderTimeoutError path.
+        if (request.method === "GET" || request.method === "HEAD") return new Response("no", { status: 404 })
+        return new Response("slow down", { status: 429 })
+      },
+    })
+    const validator = Bun.serve({
+      port: 0,
+      fetch: () => new Response("ok"),
+    })
+    const hanging = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        if (request.method === "CONNECT") return new Response("unsupported", { status: 405 })
+        // Validation and probes succeed; the POST never returns headers.
+        if (request.method === "GET" || request.method === "HEAD") {
+          const headers = new Headers(request.headers)
+          headers.delete("host")
+          return fetch(request.url, { method: request.method, headers, redirect: "manual" })
+        }
+        return new Promise(() => {})
+      },
+    })
+
+    const environment = {
+      XDG_CACHE_HOME: await mkdtemp(join(tmpdir(), "opencode-proxy-hang-")),
+      OPENCODE_PROXY: `http://127.0.0.1:${hanging.port}`,
+      OPENCODE_PROXY_ONLY: "1",
+      OPENCODE_PROXY_VALIDATE_URL: `http://127.0.0.1:${validator.port}`,
+      OPENCODE_PROXY_FORCE: undefined,
+      OPENCODE_PROXY_LOCAL: "1",
+      // One hung attempt (~10s) plus a short wait for a replacement must fail
+      // fast — never the AI transport's 5-minute header timeout.
+      OPENCODE_PROXY_BUDGET_MS: "15000",
+    }
+    const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]))
+    Object.assign(process.env, environment)
+
+    try {
+      ProxyRotator.warm()
+      const ready = Date.now() + 10_000
+      while (Date.now() < ready && ProxyRotator.status().proxies.length < 1) await Bun.sleep(50)
+
+      const started = Date.now()
+      await expect(
+        ProxyRotator.fetch(`http://127.0.0.1:${origin.port}/completion`, { method: "POST", body: "{}" }),
+      ).rejects.toThrow(/rotation exhausted/i)
+      expect(Date.now() - started).toBeLessThan(25_000)
+      expect(ProxyRotator.status().active).toBeUndefined()
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      origin.stop(true)
+      validator.stop(true)
+      hanging.stop(true)
+      SocksBridge.stop()
+    }
+  },
+  60_000,
+)

@@ -15,6 +15,8 @@ type FetchResponse = Response
 interface Entry {
   proxy: string
   checkedAt: number
+  /** Host of the list that offered this proxy, kept so burned exits can be traced. */
+  source?: string
 }
 
 const POOL_TARGET = 256
@@ -32,17 +34,37 @@ const SOURCE_MAX_BYTES = 512 * 1024
 const CANDIDATE_CACHE_MS = 30 * 60_000
 const CANDIDATE_CACHE_LIMIT = 20_000
 const ATTEMPT_TIMEOUT_MS = 10_000
-const ROTATION_BUDGET_MS = 30_000
-const MAX_ATTEMPTS = 24
+// Public exits mostly die between discovery and use, so a serial hunt spends the
+// whole budget dialing addresses that never opened a tunnel. Probe a batch in
+// parallel with a cheap request and only pay a real attempt for survivors.
+const PROBE_CONCURRENCY = 12
+const PROBE_TIMEOUT_MS = 6_000
+// The AI transport's default headerTimeout is 5 minutes. Finish the hunt before
+// that fires so a dry pool surfaces as rotation exhausted instead of a frozen
+// "Timed out waiting for response headers" that the session then retries forever
+// on the same sticky exit.
+const DEFAULT_ROTATION_BUDGET_MS = 3 * 60_000
+const MAX_ATTEMPTS = 200
+// After the direct exit answers a quota status, every direct attempt only burns a
+// round trip on the same error. Keep the block short anyway: a fresh VPN or a new
+// network is exactly what recovers a burned address, and one request a minute is
+// cheaper than never noticing the change.
+const DIRECT_BLOCK_MS = 60_000
 const FAILURES_BEFORE_BLOCK = 2
 const BLOCK_MS = 10 * 60_000
 // A proxy that already spent the daily free quota stays useless for hours, so it
 // leaves the pool instead of wasting an attempt on every request.
 const QUOTA_BLOCK_MS = 6 * 60 * 60_000
 const THROTTLE_BLOCK_MS = 60 * 60_000
-// Validate against the endpoint that actually matters: a proxy that cannot reach
-// OpenCode is not compatible with the model traffic it will carry.
-const DEFAULT_VALIDATION_URL = "https://opencode.ai/"
+// Validate against the endpoint that actually matters. The marketing site answers
+// 200 from exits that the API rejects, so probing the homepage fills the pool with
+// proxies that only produce failed tunnels. An unauthenticated GET answers 401/404,
+// which still proves the exit can carry the traffic.
+const DEFAULT_VALIDATION_URL = "https://opencode.ai/inference/systemone/v1/chat/completions"
+// A reachable exit answers 400/401/404/405 to an unauthenticated probe. Blocks and
+// quota errors mean the tunnel is useless for the traffic it would carry.
+const UNUSABLE_STATUS = new Set([402, 403, 407, 429])
+const reachable = (status: number) => status < 500 && !UNUSABLE_STATUS.has(status)
 
 // OpenCode Zen reports an exhausted free quota as 402 as well as 429, so both rotate.
 // 403 is what a filtered exit returns instead of a quota error, so it must rotate
@@ -187,6 +209,7 @@ const SOURCES: ReadonlyArray<Source> = [
 
 let entries: Entry[] = []
 let active: string | undefined
+let directBlockedUntil = 0
 let starting: Promise<void> | undefined
 let lastRefresh = 0
 // The cached pool is the only warm state a fresh standalone process has, so every
@@ -312,20 +335,26 @@ const discover = async () => {
   const results = await Promise.allSettled(
     SOURCES.map(async (source) => {
       const text = await fetchText(source.url)
-      return text ? parseSource(source, text) : []
+      const host = new URL(source.url).host
+      return text ? parseSource(source, text).map((proxy) => ({ proxy, source: host })) : []
     }),
   )
   return results.flatMap((result) => (result.status === "fulfilled" ? result.value : []))
 }
 
-const add = (proxy: string, checkedAt: number) => {
+const add = (proxy: string, checkedAt: number, source?: string) => {
   const existing = entries.find((entry) => entry.proxy === proxy)
   if (existing) {
     existing.checkedAt = Math.max(existing.checkedAt, checkedAt)
+    existing.source ??= source
     return
   }
-  entries.push({ proxy, checkedAt })
+  entries.push({ proxy, checkedAt, source })
 }
+
+// Burned exits are usually traceable to the list that offered them, so the source
+// rides along in every debug line and in the cache.
+const sourceOf = (proxy: string) => entries.find((entry) => entry.proxy === proxy)?.source
 
 const blocked = (proxy: string) => {
   const state = failures.get(proxy)
@@ -350,13 +379,28 @@ const markFailure = (proxy: string) => {
   void saveCache()
 }
 
-const markQuota = (proxy: string, status: number) => {
+// A public exit that cannot open a tunnel now will not open one on the next
+// request either, so it leaves immediately instead of costing a second dial.
+const markDead = (proxy: string) => {
   if (active === proxy) active = undefined
   const state = failures.get(proxy) ?? { count: 0, blockedUntil: 0 }
   state.count = FAILURES_BEFORE_BLOCK
-  state.blockedUntil = Math.max(state.blockedUntil, Date.now() + (status === 402 ? QUOTA_BLOCK_MS : THROTTLE_BLOCK_MS))
+  state.blockedUntil = Math.max(state.blockedUntil, Date.now() + BLOCK_MS)
   failures.set(proxy, state)
-  debug("quota", proxy, status)
+  debug("dead", proxy, sourceOf(proxy) ?? "unknown")
+  void saveCache()
+}
+
+const markQuota = (proxy: string, status: number, daily: boolean) => {
+  if (active === proxy) active = undefined
+  const state = failures.get(proxy) ?? { count: 0, blockedUntil: 0 }
+  state.count = FAILURES_BEFORE_BLOCK
+  state.blockedUntil = Math.max(
+    state.blockedUntil,
+    Date.now() + (daily || status === 402 ? QUOTA_BLOCK_MS : THROTTLE_BLOCK_MS),
+  )
+  failures.set(proxy, state)
+  debug("quota", proxy, sourceOf(proxy) ?? "unknown", status, daily || status === 402 ? "daily" : "throttle")
   void saveCache()
   // A burned proxy shrinks the pool, so look for replacements in the background.
   if (usable().length < POOL_TARGET / 2) {
@@ -370,7 +414,8 @@ const markSuccess = (proxy: string) => {
   failures.delete(proxy)
   const entry = entries.find((item) => item.proxy === proxy)
   if (entry) entry.checkedAt = Date.now()
-  debug("using", proxy)
+  debug("using", proxy, sourceOf(proxy) ?? "unknown")
+  void saveCache()
 }
 
 const proxyFor = (proxy: string) => {
@@ -387,21 +432,39 @@ const validate = async (proxy: string) => {
       signal: AbortSignal.timeout(VALIDATE_TIMEOUT_MS),
     })
     await response.body?.cancel()
-    return response.ok
+    return reachable(response.status)
   } catch {
     return false
   }
 }
 
-const validateMany = async (candidates: string[], stop: () => boolean) => {
+// The probe reports the status instead of a boolean so the caller can tell a dead
+// exit from one that only exhausted its quota.
+const probe = async (proxy: string, target: string, signal: AbortSignal | undefined, deadline: number) => {
+  const remaining = Math.max(500, Math.min(PROBE_TIMEOUT_MS, deadline - Date.now()))
+  const timeout = AbortSignal.timeout(remaining)
+  try {
+    const response = await globalThis.fetch(target, {
+      method: "GET",
+      proxy: await proxyFor(proxy),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    })
+    await response.body?.cancel()
+    return response.status
+  } catch {
+    return
+  }
+}
+
+const validateMany = async (candidates: ReadonlyArray<{ proxy: string; source?: string }>, stop: () => boolean) => {
   let index = 0
   await Promise.all(
     Array.from({ length: VALIDATE_CONCURRENCY }, async () => {
       while (!stop() && index < candidates.length) {
-        const proxy = candidates[index++]
-        if (await validate(proxy)) {
-          add(proxy, Date.now())
-          debug("validated", proxy)
+        const candidate = candidates[index++]
+        if (await validate(candidate.proxy)) {
+          add(candidate.proxy, Date.now(), candidate.source)
+          debug("validated", candidate.proxy, candidate.source ?? "unknown")
         }
         // A failed probe keeps the entry stale instead of deleting it: a slow or
         // filtered network must not throw away proxies that work later.
@@ -431,20 +494,33 @@ const readCandidates = async () => {
     if (!data || typeof data !== "object") return
     if (!("savedAt" in data) || typeof data.savedAt !== "number") return
     if (!("proxies" in data) || !Array.isArray(data.proxies)) return
-    const proxies = data.proxies.flatMap((value) => {
+    const sources =
+      "sources" in data && data.sources && typeof data.sources === "object"
+        ? (data.sources as Record<string, unknown>)
+        : {}
+    const candidates = data.proxies.flatMap((value) => {
       if (typeof value !== "string") return []
       const proxy = normalize(value)
-      return proxy ? [proxy] : []
+      if (!proxy) return []
+      const source = sources[proxy]
+      return [{ proxy, source: typeof source === "string" ? source : undefined }]
     })
-    return { savedAt: data.savedAt, proxies }
+    return { savedAt: data.savedAt, candidates }
   } catch {}
 }
 
-const saveCandidates = async (proxies: string[]) => {
+const saveCandidates = async (candidates: ReadonlyArray<{ proxy: string; source?: string }>) => {
   const path = candidatePath()
   try {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-    await Bun.write(path, JSON.stringify({ savedAt: Date.now(), proxies: proxies.slice(0, CANDIDATE_CACHE_LIMIT) }))
+    const kept = candidates.slice(0, CANDIDATE_CACHE_LIMIT)
+    const sources = Object.fromEntries(
+      kept.flatMap((candidate) => (candidate.source ? [[candidate.proxy, candidate.source]] : [])),
+    )
+    await Bun.write(
+      path,
+      JSON.stringify({ savedAt: Date.now(), proxies: kept.map((candidate) => candidate.proxy), sources }),
+    )
     await chmod(path, 0o600)
   } catch (cause) {
     debug("candidate cache write failed", cause)
@@ -461,11 +537,18 @@ const readCache = async () => {
       const proxy = "proxy" in value && typeof value.proxy === "string" ? normalize(value.proxy) : undefined
       const checkedAt = "checkedAt" in value && typeof value.checkedAt === "number" ? value.checkedAt : 0
       const blockedUntil = "blockedUntil" in value && typeof value.blockedUntil === "number" ? value.blockedUntil : 0
+      const source = "source" in value && typeof value.source === "string" ? value.source : undefined
       if (!proxy) continue
-      add(proxy, checkedAt)
+      add(proxy, checkedAt, source)
       // Burned proxies stay cached so a later run skips them instead of retrying.
       if (blockedUntil > Date.now())
         failures.set(proxy, { count: FAILURES_BEFORE_BLOCK, blockedUntil })
+    }
+    // A restart should resume on the exit that last answered instead of hunting
+    // again, which is the slowest possible start.
+    if ("active" in data && typeof data.active === "string") {
+      const proxy = normalize(data.active)
+      if (proxy && !blocked(proxy)) active = proxy
     }
   } catch {}
 }
@@ -474,18 +557,19 @@ const saveCache = async () => {
   const path = cachePath()
   try {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+    // Burned exits must stay in the cache with blockedUntil. Dropping them made
+    // every restart rediscover the same dead addresses from the candidate list.
     const data = JSON.stringify({
       version: 1,
-      // A proxy that answered 402/429 leaves the list: keeping it only wastes an
-      // attempt on the next run, and discovery can offer it again later.
+      active,
       entries: entries
-        .filter((entry) => (failures.get(entry.proxy)?.blockedUntil ?? 0) <= Date.now())
         .toSorted((left, right) => left.checkedAt - right.checkedAt)
         .slice(-POOL_CACHE_LIMIT)
         .map((entry) => ({
           proxy: entry.proxy,
           checkedAt: entry.checkedAt,
           blockedUntil: failures.get(entry.proxy)?.blockedUntil ?? 0,
+          source: entry.source,
         })),
     })
     await Bun.write(path, data)
@@ -501,21 +585,34 @@ const refresh = async () => {
   await load()
   const now = Date.now()
   const fresh = entries.filter((entry) => now - entry.checkedAt < POOL_FRESH_MS)
-  const stale = entries.filter((entry) => now - entry.checkedAt >= POOL_FRESH_MS).map((entry) => entry.proxy)
+  const stale = entries.filter((entry) => now - entry.checkedAt >= POOL_FRESH_MS)
   const known = new Set(fresh.map((entry) => entry.proxy))
   const cached = await readCandidates()
   const reuse = process.env.OPENCODE_PROXY_ONLY !== "1" && cached && now - cached.savedAt < CANDIDATE_CACHE_MS
-  const discovered = reuse ? cached.proxies : process.env.OPENCODE_PROXY_ONLY === "1" ? [] : await discover()
+  const discovered = reuse
+    ? cached.candidates
+    : process.env.OPENCODE_PROXY_ONLY === "1"
+      ? []
+      : await discover()
   if (!reuse && discovered.length > 0) void saveCandidates(discovered)
-  const candidates = shuffle(
-    [...stale, ...(await seeded()), ...discovered].filter((proxy) => {
-      if (known.has(proxy)) return false
-      known.add(proxy)
+  const candidates = shuffle([
+    ...stale.map((entry) => ({ proxy: entry.proxy, source: entry.source })),
+    ...(await seeded()).map((proxy) => ({ proxy })),
+    ...discovered,
+  ])
+    .filter((candidate) => {
+      // A previously burned exit is still in the candidate dump for hours; skip it
+      // here so validation does not spend slots re-probing known-dead addresses.
+      if (blocked(candidate.proxy) || known.has(candidate.proxy)) return false
+      known.add(candidate.proxy)
       return true
-    }),
-  ).slice(0, MAX_CANDIDATES)
+    })
+    .slice(0, MAX_CANDIDATES)
 
-  await validateMany([...fresh.map((entry) => entry.proxy), ...candidates], () => usable().length >= POOL_TARGET)
+  await validateMany(
+    [...fresh.map((entry) => ({ proxy: entry.proxy, source: entry.source })), ...candidates],
+    () => usable().length >= POOL_TARGET,
+  )
   await saveCache()
   debug("pool", usable().length)
 }
@@ -532,22 +629,17 @@ export const warm = () => {
     })
 }
 
-const pick = (exclude: Set<string>) => {
-  const fresh = usable().filter((entry) => !exclude.has(entry.proxy))
-  // A stale entry only lost its freshness stamp, so it is still worth an attempt
-  // instead of waiting for a revalidation that the slow network delays.
-  const list = fresh.length > 0 ? fresh : entries.filter((entry) => !blocked(entry.proxy) && !exclude.has(entry.proxy))
-  if (list.length === 0) return
-  return list[Math.floor(Math.random() * list.length)].proxy
-}
-
-const waitForProxy = async (timeout: number, exclude: Set<string>) => {
-  const until = Date.now() + timeout
-  while (Date.now() < until) {
-    const proxy = pick(exclude)
-    if (proxy) return proxy
-    await Bun.sleep(100)
-  }
+const pickMany = (exclude: Set<string>, count: number) => {
+  const list = entries.filter((entry) => !blocked(entry.proxy) && !exclude.has(entry.proxy))
+  if (list.length === 0) return []
+  // Free exits die quickly. Picking uniformly across an hour-old pool spends most
+  // probes on addresses that were already dead when the request started, so prefer
+  // the newest half while still sampling the rest.
+  const newest = list.toSorted((left, right) => right.checkedAt - left.checkedAt)
+  const window = newest.slice(0, Math.max(count, Math.ceil(newest.length / 2)))
+  return shuffle(window)
+    .slice(0, count)
+    .map((entry) => entry.proxy)
 }
 
 const replayable = (input: FetchInput, init: FetchInit | undefined) => {
@@ -576,10 +668,22 @@ const prepareBody = async (input: FetchInput, init: FetchInit | undefined) => {
       init: { ...init, body: await new Response(init.body).arrayBuffer() },
       canRetry: true,
     }
+  // Effect often hands a Request whose body is a one-shot stream. Buffer it into
+  // init so every rotate attempt can rebuild the same POST instead of leaking the
+  // first 429 when clone() is no longer available.
+  if (input instanceof Request && input.body && !input.bodyUsed) {
+    const body = await input.clone().arrayBuffer()
+    const headers = new Headers(input.headers)
+    return {
+      input: input.url,
+      init: { ...init, method: input.method, headers, body },
+      canRetry: true,
+    }
+  }
   return { input, init, canRetry: replayable(input, init) }
 }
 
-const send = (
+const send = async (
   input: FetchInput,
   init: FetchInit | undefined,
   proxy: string | undefined,
@@ -589,15 +693,57 @@ const send = (
   const request: FetchInput = input instanceof Request ? (input.clone() as FetchInput) : input
   if (!proxy) return globalThis.fetch(request, init)
   const external = init?.signal ?? (input instanceof Request ? input.signal : undefined)
-  const timeout = AbortSignal.timeout(timeoutMs)
-  return globalThis.fetch(request, {
-    ...init,
-    proxy,
-    signal: external ? AbortSignal.any([external, timeout]) : timeout,
+  // Bun's proxy/SOCKS path sometimes ignores AbortSignal while waiting for
+  // response headers. A sticky exit that hangs then burns the whole AI header
+  // timeout (5 min) and the session retries the same proxy forever. Abort through
+  // a controller and also race a hard timer so rotation always moves on.
+  const controller = new AbortController()
+  const onAbort = () => controller.abort()
+  external?.addEventListener("abort", onAbort)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new Error(`Proxy header timeout after ${timeoutMs}ms`))
+    }, timeoutMs)
   })
+  try {
+    return await Promise.race([
+      globalThis.fetch(request, {
+        ...init,
+        proxy,
+        signal: controller.signal,
+      }),
+      timedOut,
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    external?.removeEventListener("abort", onAbort)
+  }
 }
 
 export const shouldRotate = (status: number) => ROTATE_STATUS.has(status)
+
+const DEFAULT_QUOTA_LIMIT = 24
+
+const rotationBudget = () => {
+  const value = Number(process.env.OPENCODE_PROXY_BUDGET_MS)
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_ROTATION_BUDGET_MS
+}
+
+// Every public exit shares the same fate once the free quota for its address is
+// spent. After this many quota answers in one request the pool is dry, and waiting
+// only burns more escapes instead of finding one that can answer.
+const quotaLimit = () => {
+  const value = Number(process.env.OPENCODE_PROXY_QUOTA_LIMIT)
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_QUOTA_LIMIT
+}
+
+// The provider's own quota wording decides whether the exit is burned for the
+// day or only throttled for a while. Both leave the pool, but the daily case comes
+// back much later.
+const dailyQuota = (status: number, body: string) =>
+  status === 402 || /freeusagelimiterror|usage limit|quota[-_\s]?exceeded/i.test(body)
 
 export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchResponse> => {
   const target = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
@@ -621,26 +767,70 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
   init = prepared.init
   debug("replayable", canRetry)
   const excluded = new Set<string>()
-  const deadline = Date.now() + ROTATION_BUDGET_MS
-  let directTried = false
+  const deadline = Date.now() + rotationBudget()
+  // A recently limited direct exit only repeats its quota error, so start on the
+  // pool and give the direct attempt another chance after the block expires. When
+  // every known exit is blocked the pool is dry, so ignore the block: the caller's
+  // own network may have changed (VPN) or the allowance may have reset.
+  let directBlocked = Date.now() < directBlockedUntil && !entries.every((entry) => blocked(entry.proxy))
+  let directAttempts = 0
+  let quotaHits = 0
   let proxyTried = false
-  let fallback: FetchResponse | undefined
   let failure: unknown
   // Always leave a trace: a failed rotation is the one case users need to report.
   const tried: string[] = []
 
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    // Spread requests across the pool. Staying on one exit burns that IP's free
-    // quota while the rest of the pool sits idle, so a known-good proxy is only a
-    // fallback when nothing else is available.
+  const external = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+  // The deadline bounds the hunt. This guard only stops a pathologically uniform
+  // stream of real attempts from pinning a request forever.
+  let attempts = 0
+  while (Date.now() < deadline && attempts < MAX_ATTEMPTS) {
+    // Keep the last exit that answered until it fails. Reusing a live proxy avoids
+    // re-hunting a replacement on every single model call, while a rate-limited or
+    // dead exit is discarded below and never selected again.
     const sticky = active && !excluded.has(active) && !blocked(active) ? active : undefined
-    const selected = !force && !directTried && !proxyTried ? undefined : pick(excluded) ?? sticky
-    if (!selected && (force || directTried || proxyTried)) {
-      // The pool validates in the background, so a limited request waits for the
-      // first proxy instead of failing with the direct quota error.
-      const proxy = await waitForProxy(Math.min(10_000, Math.max(0, deadline - Date.now())), excluded)
-      if (!proxy) break
-      continue
+    const direct = !force && !proxyTried && !sticky && directAttempts === 0 && !directBlocked
+    let selected = direct ? undefined : sticky
+
+    if (!direct && !selected) {
+      const batch = pickMany(excluded, PROBE_CONCURRENCY)
+      if (batch.length === 0) {
+        // The pool ran dry. A block inherited from a previous request may be stale
+        // because the caller switched networks, so give direct one more look before
+        // waiting for discovery.
+        if (directAttempts === 0 && directBlocked) {
+          directBlocked = false
+          continue
+        }
+        // The pool validates in the background, so a limited request waits for a
+        // fresh candidate instead of failing with the direct quota error. Poll in
+        // short slices so a proxy that lands mid-wait is used immediately.
+        warm()
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) break
+        await Bun.sleep(Math.min(250, remaining))
+        continue
+      }
+      const probed = await Promise.all(
+        batch.map(async (proxy) => ({ proxy, status: await probe(proxy, target, external, deadline) })),
+      )
+      for (const result of probed) {
+        if (result.status !== undefined && reachable(result.status)) continue
+        excluded.add(result.proxy)
+        if (result.status === 402 || result.status === 429) {
+          quotaHits++
+          markQuota(result.proxy, result.status, false)
+        } else if (result.status === undefined || result.status === 403 || result.status === 407)
+          markDead(result.proxy)
+        else markFailure(result.proxy)
+      }
+      selected = probed.find((result) => result.status !== undefined && reachable(result.status))?.proxy
+      debug("probe", batch.length, selected ? "alive" : "none")
+      if (quotaHits >= quotaLimit()) {
+        debug("quota dry", quotaHits)
+        break
+      }
+      if (!selected) continue
     }
 
     let proxy: string | undefined
@@ -656,56 +846,92 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
       }
     }
 
+    attempts++
     try {
       const remaining = Math.max(1_000, deadline - Date.now())
-      debug("attempt", proxy ?? "direct", new URL(target).host)
+      debug("attempt", selected ?? "direct", new URL(target).host)
       const response = await send(input, init, proxy, Math.min(ATTEMPT_TIMEOUT_MS, remaining))
-      tried.push(`${proxy ?? "direct"}=${response.status}`)
-      debug("response", proxy ?? "direct", response.status)
+      tried.push(`${selected ?? "direct"}=${response.status}`)
+      debug("response", selected ?? "direct", response.status)
       if (!shouldRotate(response.status)) {
         if (selected) markSuccess(selected)
+        else directBlockedUntil = 0
         return response
       }
 
-      if (!canRetry) return response
-      fallback ??= response.clone() as FetchResponse
-      await response.body?.cancel()
-
+      // Never hand a quota/block status to the caller: that is what paints the
+      // FreeLimitNotice. Discard the exit and keep hunting, or fail as rotation
+      // exhausted once the body cannot be replayed.
+      const body = await response.text().catch(() => "")
+      if (!canRetry) {
+        tried.push(`${selected ?? "direct"}=${response.status}/noreplay`)
+        break
+      }
       if (!selected) {
-        directTried = true
+        directAttempts++
+        directBlocked = true
+        directBlockedUntil = Date.now() + DIRECT_BLOCK_MS
         continue
       }
-      if (response.status === 402 || response.status === 429) markQuota(selected, response.status)
-      else markFailure(selected)
+      if (response.status === 402 || response.status === 429) {
+        quotaHits++
+        markQuota(selected, response.status, dailyQuota(response.status, body))
+      } else markFailure(selected)
       excluded.add(selected)
+      if (quotaHits >= quotaLimit()) {
+        debug("quota dry", quotaHits)
+        break
+      }
       if (Date.now() > deadline) break
     } catch (cause) {
-      tried.push(`${proxy ?? "direct"}=timeout`)
-      if (init?.signal?.aborted) throw cause
+      tried.push(`${selected ?? "direct"}=timeout`)
       failure = cause
-      // A direct network failure is still worth a proxy attempt, but only when the
-      // pool holds one; otherwise the same error must surface without delay.
+      debug("error", selected ?? "direct", cause instanceof Error ? cause.message : cause)
+      // A hang waiting for headers is the worst case: the AI layer reports
+      // ProviderHeaderTimeoutError, the chat freezes on that message, and a silent
+      // session retry reuses the same sticky exit. Burn the exit before rethrowing
+      // an outer abort so the next attempt hunts a replacement.
       if (!selected) {
-        // Fall through to the pool: a direct timeout often means the exit is
-        // filtered while a proxy still reaches the endpoint.
-        directTried = true
-        continue
+        directAttempts++
+        directBlocked = true
+      } else {
+        markDead(selected)
+        excluded.add(selected)
       }
-      markFailure(selected)
-      excluded.add(selected)
+      if (external?.aborted) throw cause
       if (Date.now() > deadline) break
     }
   }
 
-  if (fallback) {
-    console.error(`[proxy-rotator] rotation failed: ${tried.join(" ")}`)
-    return fallback
-  }
-  if (failure) throw failure
-  return globalThis.fetch(input, init)
+  const detail = tried.join(" ")
+  console.error(`[proxy-rotator] rotation exhausted: ${detail || "no attempt"}`)
+  throw new Error(
+    `Proxy rotation exhausted for ${new URL(target).host}: no exit returned a usable response${
+      detail ? ` (${detail})` : ""
+    }`,
+    { cause: failure },
+  )
 }
 
 export const status = () => ({
   active,
   proxies: usable().map((entry) => entry.proxy),
 })
+
+// Drop the sticky exit after a transport-level header timeout so a session retry
+// does not dial the same hung proxy again.
+export const invalidateActive = () => {
+  if (!active) return
+  markDead(active)
+}
+
+// Tests share one process-wide rotator; clear in-memory pool state between cases.
+export const reset = () => {
+  entries = []
+  active = undefined
+  directBlockedUntil = 0
+  starting = undefined
+  lastRefresh = 0
+  loading = undefined
+  failures.clear()
+}
