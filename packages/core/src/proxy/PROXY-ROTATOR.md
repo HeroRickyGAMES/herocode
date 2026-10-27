@@ -53,14 +53,15 @@ Status que **obrigam rotação** (nunca voltam pro caller como free-limit):
 
 ## Discovery e pool
 
-Fontes públicas (`SOURCES`): listas GitHub raw, ProxyScrape, Geonode, etc.
+Fontes públicas (`SOURCES`): conjunto enxuto (hookzof, hproxy http/https/socks4, ProxyScraper socks, rdavydov, ProxyScrape http/https/socks4, Geonode). Famílias que o log/EXPUNGE mataram (monosans, vakhov, hideip, TheSpeedX, proxifly, iplocate, proxyscrape socks5, …) saem do array e ficam em `HARD_PURGED`.
 
 1. Download (prefixo até 512 KiB) → parse → candidatos.
-2. Validação concorrente contra  
+2. Candidatos intercalados **por source** (round-robin) até 2500 — senão a 1ª lista (ex.: hookzof) engolia o budget e o warm ocioso parecia monofonte.
+3. Validação concorrente contra  
    `https://opencode.ai/inference/systemone/v1/chat/completions`  
    (GET sem auth: 401/404 conta como vivo; 402/403/407/429 = inútil).
-3. Pool alvo: **256** exits frescos (`POOL_FRESH_MS` = 1 h).
-4. Refresh em background a cada ~4 min.
+4. Pool alvo: **256** exits frescos (`POOL_FRESH_MS` = 1 h).
+5. Refresh em background a cada ~4 min (também no boot: fetch de models/`models.dev` passa pelo rotator **sem** você ter mandado chat).
 
 Cada proxy carrega uma **source** legível:
 
@@ -70,11 +71,15 @@ Cada proxy carrega uma **source** legível:
 
 ### Yield por source
 
-Contadores `ok` / `bad` por lista (path completo, não só o host):
+Contadores `ok` / `bad` por lista (path completo, não só o host). **Só POST/sticky** — validate não mexe em yield (nem `ok` nem `bad`). Contar invalid como `bad` EXPURGOU todas as fontes restantes após ~8 dials e deixou `pool 0`.
 
-- Lista com ≥ 8 amostras e ≥ 85% `bad` → **toxic**: discovery e pick pulam.
-- Pick / validação preferem sources com score melhor (`(ok - bad) / total`).
-- Label legado só-host (`raw.githubusercontent.com`) **nunca** fica toxic — isso chegou a banir 194 proxies de uma vez enquanto o pool “parecia” cheio.
+- Sticky / POST ok → `ok`; quota/dead/failure no POST → `bad`.
+- ≥ 5 amostras e ≥ 80% `bad` → **toxic**: discovery e pick pulam.
+- Expunge permanente: `0 ok` + ≥ 8 `bad` (POST), ou ≥ 85% `bad` com ≥ 16 amostras.
+- Cache `yieldVersion < 3` descarta yields/`purged` runtime (mantém só `HARD_PURGED`).
+- Geonode usa `protocols=` no label (antes todas as pages viravam um balde só).
+- Megadumps (TheSpeedX, proxifly, hideip, monosans, …) em `HARD_PURGED_SOURCES`.
+- Label legado só-host (`raw.githubusercontent.com`) **nunca** fica toxic.
 
 ## Cache em disco
 
@@ -82,7 +87,7 @@ Em `$XDG_CACHE_HOME/opencode/` (ou `~/.cache/opencode/`):
 
 | Arquivo | Conteúdo |
 |---|---|
-| `proxy-pool.json` | entries (`proxy`, `checkedAt`, `blockedUntil`, `source`), `active`, `yields` |
+| `proxy-pool.json` | entries, `active`, `yields` (`yieldVersion`), `subnets`, `purged` |
 | `proxy-candidates.json` | até 20k candidatos + mapa `sources` (TTL 30 min) |
 
 Exits queimados **permanecem** no pool com `blockedUntil`, para o próximo restart não redescobrir o mesmo IP morto.
@@ -107,9 +112,24 @@ Hang em headers → `markDead` **antes** de relançar abort externo, para o retr
 | Quota diária (402 / FreeUsageLimit) | 6 h |
 | Throttle 429 | 15 min |
 | Direct com quota | 60 s (retesta se o pool secar — VPN / rede nova) |
-| 2+ quotas no mesmo **/24** | Queima o subnet inteiro no mesmo window (ex.: `45.74.31.0/24`) |
+| 2+ quotas POST no mesmo **/24** | Ban persistente do subnet (`subnetBlocks` + cache) até o window acabar — exits *novos* do mesmo bloco não reentram via validate (ex.: `45.74.31.0/24`) |
 
-Quando a **pool inteira** toma 402/429: `retireQuotaPool` queima os exits das mesmas sources, coloca as listas em **cooldown 10 min** (não envenena o yield cache pra sempre), descarta o peso morto e força `discover` da próxima pool (até 4 advances). Se ainda vier vazio, faz thaw dos yields tóxicos + libera metade dos cooldowns e tenta de novo.
+Quando a **pool inteira** toma 402/429: `retireQuotaPool` queima os exits, cooldown 10 min nas listas, e força `discover` da próxima pool. Budget default é **infinito** (só para com abort do caller; `OPENCODE_PROXY_BUDGET_MS` limita se setado).
+
+### Expurgo de fontes
+
+Listas ~100% mortas **saem de vez** (`expungeSource`):
+
+- `0 ok` + `≥ 8 bad`, ou `≥ 95% bad` com `≥ 20` amostras
+- Removidas do discover/pick, dos `entries`, e persistidas em `proxy-pool.json` → `purged`
+- Fontes já medidas como lixo (ALIILAPRO, ErcinDedeoglu, mmpx12, roosterkid, …) nem entram em `SOURCES`
+
+Debug (`OPENCODE_PROXY_DEBUG=1`):
+
+```
+raw.githubusercontent.com/monosans/.../http.txt : proxy: 1.2.3.4:8080
+[proxy-rotator] EXPUNGED source … (0ok/12bad) removed 40 exits
+```
 
 ## Variáveis de ambiente
 

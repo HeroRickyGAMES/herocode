@@ -43,12 +43,13 @@ const FIRST_BYTE_TIMEOUT_MS = 8_000
 // parallel with a cheap request and only pay a real attempt for survivors.
 const PROBE_CONCURRENCY = 12
 const PROBE_TIMEOUT_MS = 6_000
-// The AI transport's default headerTimeout is 5 minutes. Finish the hunt before
-// that fires so a dry pool surfaces as rotation exhausted instead of a frozen
-// "Timed out waiting for response headers" that the session then retries forever
-// on the same sticky exit.
-const DEFAULT_ROTATION_BUDGET_MS = 3 * 60_000
-const MAX_ATTEMPTS = 200
+// Default: hunt until the caller aborts. A finite budget only applies when
+// OPENCODE_PROXY_BUDGET_MS is set > 0 (tests / cautious installs).
+const DEFAULT_ROTATION_BUDGET_MS = Number.POSITIVE_INFINITY
+const MAX_ATTEMPTS = Number.POSITIVE_INFINITY
+// Soft cap on pool advances per finite-budget hunt. Infinite budget keeps
+// retiring forever.
+const MAX_POOL_ADVANCES = 4
 // After the direct exit answers a quota status, every direct attempt only burns a
 // round trip on the same error. Keep the block short anyway: a fresh VPN or a new
 // network is exactly what recovers a burned address, and one request a minute is
@@ -100,91 +101,19 @@ type Source = {
   readonly kind?: "hideip" | "geonode" | "advanced"
 }
 
+// Keep only lists that still produce usable free-tier exits. Families that the
+// live rotator already EXPUNGED (or flooded the hunt with POST 429s) are gone
+// from discover and locked in HARD_PURGED so disk cache cannot revive them.
 const SOURCES: ReadonlyArray<Source> = [
-  // Mirrored GitHub lists, one `host:port` per line.
-  { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/https.txt", fallback: "https" },
-  { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt", fallback: "http" },
-  {
-    url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/https/data.txt",
-    fallback: "https",
-  },
-  {
-    url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks4/data.txt",
-    fallback: "socks4",
-  },
-  {
-    url: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
-    fallback: "socks5",
-  },
-  { url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks4.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks4.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt", fallback: "https" },
-  { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks4.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/HTTP.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/SOCKS5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/themiralay/Proxy-List-World/master/data.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt", fallback: "http" },
-  { url: "https://api.openproxylist.xyz/http.txt", fallback: "http" },
-  { url: "https://api.openproxylist.xyz/https.txt", fallback: "https" },
-  { url: "https://api.openproxylist.xyz/socks4.txt", fallback: "socks4" },
-  { url: "https://api.openproxylist.xyz/socks5.txt", fallback: "socks5" },
-  { url: "https://proxyspace.pro/http.txt", fallback: "http" },
-  { url: "https://proxyspace.pro/https.txt", fallback: "https" },
-  { url: "https://proxyspace.pro/socks5.txt", fallback: "socks5" },
-  // Sources that publish their own hourly verification and a per-protocol file.
   { url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/http.txt", fallback: "http" },
   { url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/https.txt", fallback: "https" },
   { url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks4.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt", fallback: "http" },
   { url: "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks4.txt", fallback: "socks4" },
   { url: "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/socks4.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/all.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/http.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/socks4.txt", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/socks5.txt", fallback: "socks5" },
   { url: "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt", fallback: "http" },
   { url: "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks4.txt", fallback: "socks4" },
   { url: "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks5.txt", fallback: "socks5" },
-  { url: "https://raw.githubusercontent.com/saisuiu/Lionkings-Http-Proxys-Proxies/main/cnfree.txt", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt", kind: "hideip", fallback: "https" },
-  { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt", kind: "hideip", fallback: "http" },
-  { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt", kind: "hideip", fallback: "socks4" },
-  { url: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt", kind: "hideip", fallback: "socks5" },
   {
     url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text",
     fallback: "http",
@@ -197,14 +126,6 @@ const SOURCES: ReadonlyArray<Source> = [
     url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks4&proxy_format=ipport&format=text",
     fallback: "socks4",
   },
-  {
-    url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text",
-    fallback: "socks5",
-  },
-  { url: "https://advanced.name/freeproxy?type=http", kind: "advanced", fallback: "http" },
-  { url: "https://advanced.name/freeproxy?type=https", kind: "advanced", fallback: "https" },
-  { url: "https://advanced.name/freeproxy?type=socks4", kind: "advanced", fallback: "socks4" },
-  { url: "https://advanced.name/freeproxy?type=socks5", kind: "advanced", fallback: "socks5" },
   ...["http,https", "socks4", "socks5"].flatMap((protocols) =>
     [1, 2, 3].map((page) => ({
       url: `https://proxylist.geonode.com/api/proxy-list?limit=500&page=${page}&sort_by=lastChecked&sort_type=desc&protocols=${protocols}`,
@@ -212,6 +133,86 @@ const SOURCES: ReadonlyArray<Source> = [
     })),
   ),
 ]
+
+// Lists measured at ~100% dead / quota-only in production. Kept out of SOURCES
+// and also seeded into the runtime purge set so old caches cannot revive them.
+const HARD_PURGED_SOURCES = [
+  "raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt",
+  "raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks4.txt",
+  "raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks5.txt",
+  "raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt",
+  "raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt",
+  "raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks4.txt",
+  "raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks5.txt",
+  "raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+  "raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt",
+  "raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt",
+  "raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+  "raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt",
+  "raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt",
+  "raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
+  "raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+  "raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
+  "raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt",
+  "raw.githubusercontent.com/zevtyardt/proxy-list/main/socks5.txt",
+  "raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
+  "raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt",
+  "raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/HTTP.txt",
+  "raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/SOCKS5.txt",
+  "raw.githubusercontent.com/prxchk/proxy-list/main/http.txt",
+  "raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt",
+  "raw.githubusercontent.com/themiralay/Proxy-List-World/master/data.txt",
+  "raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt",
+  "raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
+  "raw.githubusercontent.com/proxy-free/free-proxy-list/main/http.txt",
+  "raw.githubusercontent.com/proxy-free/free-proxy-list/main/socks4.txt",
+  "raw.githubusercontent.com/proxy-free/free-proxy-list/main/socks5.txt",
+  "raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/all.txt",
+  "raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/http.txt",
+  "raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/socks4.txt",
+  "raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/socks5.txt",
+  "raw.githubusercontent.com/saisuiu/Lionkings-Http-Proxys-Proxies/main/cnfree.txt",
+  "api.openproxylist.xyz/http.txt",
+  "api.openproxylist.xyz/https.txt",
+  "api.openproxylist.xyz/socks4.txt",
+  "api.openproxylist.xyz/socks5.txt",
+  "proxyspace.pro/http.txt",
+  "proxyspace.pro/https.txt",
+  "proxyspace.pro/socks5.txt",
+  "advanced.name/freeproxy?http",
+  "advanced.name/freeproxy?https",
+  "advanced.name/freeproxy?socks4",
+  "advanced.name/freeproxy?socks5",
+  // Production pool: validate-"ok" at 85–90% bad, thousands of POST 429s, near-zero sticky.
+  "raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+  "raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
+  "raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+  "raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
+  "raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/https/data.txt",
+  "raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks4/data.txt",
+  "raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
+  "raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt",
+  "raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt",
+  // Live EXPUNGED / hunt-flooders (POST 429 walls, 0 sticky). Removed from SOURCES too.
+  "raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+  "raw.githubusercontent.com/monosans/proxy-list/main/proxies/https.txt",
+  "raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt",
+  "raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+  "raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
+  "raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks4.txt",
+  "raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt",
+  "raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks5.txt",
+  "raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt",
+  "raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt",
+  "raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
+  "raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt",
+  "raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt",
+  "api.proxyscrape.com/v4/free-proxy-list/get?socks5",
+] as const
+
+// v2: ignore validate-as-ok yields. v3: validate must not count `bad` either
+// (8 invalids were permanently EXPUNGEing every remaining free list → pool 0).
+const YIELD_VERSION = 3
 
 let entries: Entry[] = []
 let active: string | undefined
@@ -222,25 +223,53 @@ let lastRefresh = 0
 // read path waits for it instead of racing the background refresh.
 let loading: Promise<void> | undefined
 const failures = new Map<string, { count: number; blockedUntil: number }>()
+// Free-tier quota is shared across a datacenter /24. Burning only the exits already
+// in `entries` left validateMany free to re-add cousins of the same block, so the
+// hunt spent the whole AI headerTimeout (5 min) re-429ing `45.74.31.*`.
+const subnetBlocks = new Map<string, number>()
 // Per-list outcome counts. Host-only labels collapsed every GitHub mirror into one
 // bucket, so bad lists could not be skipped — keep path (+ protocol query) instead.
 const yields = new Map<string, { ok: number; bad: number }>()
 // After a quota-burned generation, refresh must download new lists instead of
 // recycling the same candidate dump that just returned 429 for every exit.
 let forceDiscover = false
-// Cap how many times one request can throw away the pool and refill — each
-// advance spends discovery+validate time inside the rotation budget.
-const MAX_POOL_ADVANCES = 4
+// Runtime + persisted purge. Once a list proves ~100% dead it never rediscovers.
+const purgedSources = new Set<string>(HARD_PURGED_SOURCES)
+// Zero POST successes and enough failures → delete the list forever (not a cooldown).
+// Thresholds are on POST outcomes only — validate must not inflate `ok`.
+const EXPUNGE_MIN_BAD = 8
+const EXPUNGE_NEAR_DEAD_TOTAL = 16
+const EXPUNGE_NEAR_DEAD_RATIO = 0.85
 
 export const sourceLabel = (url: string) => {
   const parsed = new URL(url)
-  const protocol = parsed.searchParams.get("protocol") ?? parsed.searchParams.get("type")
+  // Geonode uses `protocols=`; ProxyScrape uses `protocol=`. Without both, every
+  // Geonode page collapsed into one bucket and one EXPUNGE killed the whole API.
+  const protocol =
+    parsed.searchParams.get("protocol") ??
+    parsed.searchParams.get("protocols") ??
+    parsed.searchParams.get("type")
   const path = parsed.pathname.replace(/\/+$/, "")
-  return protocol ? `${parsed.host}${path}?${protocol}` : `${parsed.host}${path}`
+  const page = parsed.searchParams.get("page")
+  const base = protocol ? `${parsed.host}${path}?${protocol}` : `${parsed.host}${path}`
+  return page && page !== "1" ? `${base}&page=${page}` : base
 }
 
 const debug = (...values: unknown[]) => {
   if (process.env.OPENCODE_PROXY_DEBUG) console.error("[proxy-rotator]", ...values)
+}
+
+// `monosans/proxy-list/.../http.txt : proxy: 1.2.3.4:8080` — makes dead lists obvious in the log.
+export const proxyTrace = (proxy: string | undefined, source?: string) => {
+  if (!proxy) return "direct"
+  const label = source ?? sourceOf(proxy) ?? "unknown"
+  const host = URL.canParse(proxy)
+    ? (() => {
+        const url = new URL(proxy)
+        return url.port ? `${url.hostname}:${url.port}` : url.hostname
+      })()
+    : proxy
+  return `${label} : proxy: ${host}`
 }
 
 const cachePath = () => {
@@ -358,8 +387,8 @@ const discover = async () => {
     SOURCES.map(async (source) => {
       const text = await fetchText(source.url)
       const label = sourceLabel(source.url)
-      if (sourceSkipped(label)) {
-        debug("skip source", label)
+      if (purgedSources.has(label) || sourceSkipped(label)) {
+        debug("skip source", label, purgedSources.has(label) ? "expunged" : "skipped")
         return []
       }
       return text ? parseSource(source, text).map((proxy) => ({ proxy, source: label })) : []
@@ -369,6 +398,9 @@ const discover = async () => {
 }
 
 const add = (proxy: string, checkedAt: number, source?: string) => {
+  if (source && purgedSources.has(source)) return
+  // Do not grow the pool with neighbours of a /24 that already shared a free-tier ban.
+  if (subnetBlocked(proxy)) return
   const existing = entries.find((entry) => entry.proxy === proxy)
   if (existing) {
     existing.checkedAt = Math.max(existing.checkedAt, checkedAt)
@@ -386,14 +418,25 @@ const noteYield = (proxy: string, kind: "ok" | "bad") => {
   const source = sourceOf(proxy)
   // Host-only labels are legacy; counting them re-creates the toxic-GitHub bug.
   if (!source || !source.includes("/")) return
+  if (purgedSources.has(source)) return
   const state = yields.get(source) ?? { ok: 0, bad: 0 }
   if (kind === "ok") state.ok++
   else state.bad++
   yields.set(source, state)
+  if (kind === "bad") maybeExpunge(source)
+}
+
+const noteSourceYield = (source: string | undefined, kind: "ok" | "bad") => {
+  if (!source || !source.includes("/") || purgedSources.has(source)) return
+  const state = yields.get(source) ?? { ok: 0, bad: 0 }
+  if (kind === "ok") state.ok++
+  else state.bad++
+  yields.set(source, state)
+  if (kind === "bad") maybeExpunge(source)
 }
 
 const sourceScore = (source: string | undefined) => {
-  if (!source) return 0
+  if (!source || purgedSources.has(source)) return -1
   const state = yields.get(source)
   if (!state) return 0
   const total = state.ok + state.bad
@@ -401,23 +444,49 @@ const sourceScore = (source: string | undefined) => {
   return (state.ok - state.bad) / total
 }
 
-// A list that almost only produces dead or quota exits is not worth probing again
-// this process — discovery and pick skip it until the yield window is forgotten.
-// Host-only labels (legacy `raw.githubusercontent.com`) must never go toxic: that
-// single bucket used to ban every GitHub mirror at once and empty the pickable pool
-// while usable() still looked full — the rotator then skipped direct and quit.
+// Soft toxic still skips pick until enough evidence to expunge. Host-only labels
+// never go toxic (legacy GitHub-host bucket).
 const sourceToxic = (source: string | undefined) => {
-  if (!source || !source.includes("/")) return false
+  if (!source || !source.includes("/") || purgedSources.has(source)) return false
   const state = yields.get(source)
   if (!state) return false
   const total = state.ok + state.bad
-  if (total < 8) return false
-  return state.bad / total >= 0.85
+  if (total < 5) return false
+  return state.bad / total >= 0.8
 }
 
-// Temporary skip after a generation of pure 429s. Permanent force-toxic used to
-// poison every GitHub list in the yield cache, leaving discover with nothing and
-// the session retrying "rotation exhausted" forever on an empty pool.
+const shouldExpunge = (source: string) => {
+  const state = yields.get(source)
+  if (!state) return false
+  const total = state.ok + state.bad
+  // Pure dead list.
+  if (state.ok === 0 && state.bad >= EXPUNGE_MIN_BAD) return true
+  // Effectively dead (one lucky ok amid a graveyard) — still delete the source.
+  return total >= EXPUNGE_NEAR_DEAD_TOTAL && state.bad / total >= EXPUNGE_NEAR_DEAD_RATIO
+}
+
+// Delete the list forever: no discover, no pick, drop its exits from the pool.
+const expungeSource = (source: string) => {
+  if (!source.includes("/") || purgedSources.has(source)) return
+  const state = yields.get(source)
+  purgedSources.add(source)
+  yields.delete(source)
+  const before = entries.length
+  entries = entries.filter((entry) => entry.source !== source)
+  if (active && sourceOf(active) === source) active = undefined
+  forceDiscover = true
+  lastRefresh = 0
+  void saveCache()
+  console.error(
+    `[proxy-rotator] EXPUNGED source ${source} (${state?.ok ?? 0}ok/${state?.bad ?? 0}bad) removed ${before - entries.length} exits`,
+  )
+}
+
+const maybeExpunge = (source: string) => {
+  if (shouldExpunge(source)) expungeSource(source)
+}
+
+// Temporary skip after a generation of pure 429s — not a permanent delete.
 const SOURCE_RETIRE_MS = 10 * 60_000
 const sourceCooldown = new Map<string, number>()
 
@@ -430,25 +499,8 @@ const sourceCooling = (source: string | undefined) => {
   return false
 }
 
-const sourceSkipped = (source: string | undefined) => sourceToxic(source) || sourceCooling(source)
-
-// Soft-reset yield poison so discovery can refill when every list looks toxic.
-const thawToxicYields = () => {
-  let thawed = 0
-  for (const [source, state] of yields) {
-    if (!sourceToxic(source)) continue
-    yields.set(source, {
-      ok: Math.max(1, Math.floor(state.ok / 2)),
-      bad: Math.min(3, Math.floor(state.bad / 4)),
-    })
-    thawed++
-  }
-  if (thawed > 0) {
-    debug("thaw toxic yields", thawed)
-    void saveCache()
-  }
-  return thawed
-}
+const sourceSkipped = (source: string | undefined) =>
+  !source || purgedSources.has(source) || sourceToxic(source) || sourceCooling(source)
 
 const liftOldestCooldowns = (fraction = 0.5) => {
   const cooling = [...sourceCooldown.entries()].filter(([, until]) => until > Date.now()).toSorted((a, b) => a[1] - b[1])
@@ -457,8 +509,8 @@ const liftOldestCooldowns = (fraction = 0.5) => {
   return drop
 }
 
-// Whole generation answered quota: burn sibling exits from the same lists, cool
-// those sources briefly, drop the dead weight, and force a fresh discover.
+// Whole generation answered quota: burn sibling exits, cool those lists briefly,
+// drop dead weight, and force a fresh discover of surviving sources.
 const retireQuotaPool = (quotaProxies: ReadonlyArray<string>) => {
   active = undefined
   const sources = new Set<string>()
@@ -471,7 +523,11 @@ const retireQuotaPool = (quotaProxies: ReadonlyArray<string>) => {
     if (!blocked(entry.proxy)) markQuota(entry.proxy, 429, false, true)
   }
   const until = Date.now() + SOURCE_RETIRE_MS
-  for (const source of sources) sourceCooldown.set(source, until)
+  for (const source of sources) {
+    if (purgedSources.has(source)) continue
+    sourceCooldown.set(source, until)
+    maybeExpunge(source)
+  }
   entries = entries.filter((entry) => !blocked(entry.proxy) && !sourceSkipped(entry.source))
   forceDiscover = true
   lastRefresh = 0
@@ -479,7 +535,18 @@ const retireQuotaPool = (quotaProxies: ReadonlyArray<string>) => {
   debug("retire pool", sources.size, "sources", [...sources].slice(0, 8))
 }
 
+const subnetBlocked = (proxy: string) => {
+  const subnet = subnetOf(proxy)
+  if (!subnet) return false
+  const until = subnetBlocks.get(subnet)
+  if (!until) return false
+  if (until > Date.now()) return true
+  subnetBlocks.delete(subnet)
+  return false
+}
+
 const blocked = (proxy: string) => {
+  if (subnetBlocked(proxy)) return true
   const state = failures.get(proxy)
   if (!state) return false
   if (state.blockedUntil > Date.now()) return true
@@ -512,7 +579,7 @@ const markFailure = (proxy: string) => {
     noteYield(proxy, "bad")
   }
   failures.set(proxy, state)
-  debug("failed", proxy, sourceOf(proxy) ?? "unknown")
+  debug("failed", proxyTrace(proxy))
   void saveCache()
 }
 
@@ -525,7 +592,7 @@ const markDead = (proxy: string) => {
   state.blockedUntil = Math.max(state.blockedUntil, Date.now() + BLOCK_MS)
   failures.set(proxy, state)
   noteYield(proxy, "bad")
-  debug("dead", proxy, sourceOf(proxy) ?? "unknown")
+  debug("dead", proxyTrace(proxy))
   void saveCache()
 }
 
@@ -540,24 +607,37 @@ const markQuota = (proxy: string, status: number, daily: boolean, fromProbe = fa
   state.blockedUntil = Math.max(state.blockedUntil, until)
   failures.set(proxy, state)
   noteYield(proxy, "bad")
-  debug("quota", proxy, sourceOf(proxy) ?? "unknown", status, daily || status === 402 ? "daily" : "throttle", fromProbe ? "probe" : "POST")
+  debug(
+    "quota",
+    proxyTrace(proxy),
+    status,
+    daily || status === 402 ? "daily" : "throttle",
+    fromProbe ? "probe" : "POST",
+  )
   // Neighbours in the same /24 usually share the free-tier bucket — but only after
   // real POSTs. Probe 429s must not wipe the sticky that just answered a chat turn.
   const subnet = !fromProbe ? subnetOf(proxy) : undefined
   if (subnet) {
-    const hit = entries.filter((entry) => subnetOf(entry.proxy) === subnet && blocked(entry.proxy)).length
+    const hit = entries.filter((entry) => {
+      if (subnetOf(entry.proxy) !== subnet) return false
+      const state = failures.get(entry.proxy)
+      return state !== undefined && state.blockedUntil > Date.now()
+    }).length
     if (hit >= SUBNET_QUOTA_BEFORE_BLOCK) {
+      // Remember the /24 itself so later-validated cousins stay unpickable for `until`.
+      subnetBlocks.set(subnet, Math.max(subnetBlocks.get(subnet) ?? 0, until))
       let burned = 0
       for (const entry of entries) {
-        if (subnetOf(entry.proxy) !== subnet || blocked(entry.proxy)) continue
+        if (subnetOf(entry.proxy) !== subnet) continue
         if (entry.proxy === active) continue
         const neighbour = failures.get(entry.proxy) ?? { count: 0, blockedUntil: 0 }
+        if (neighbour.blockedUntil >= until) continue
         neighbour.count = FAILURES_BEFORE_BLOCK
         neighbour.blockedUntil = Math.max(neighbour.blockedUntil, until)
         failures.set(entry.proxy, neighbour)
         burned++
       }
-      if (burned > 0) debug("subnet quota", subnet, burned, status, "kept sticky", active ?? "none")
+      debug("subnet quota", subnet, burned, status, "kept sticky", active ?? "none")
     }
   }
   void saveCache()
@@ -576,7 +656,7 @@ const markSuccess = (proxy: string) => {
   if (entry) entry.checkedAt = Date.now()
   else add(proxy, Date.now())
   noteYield(proxy, "ok")
-  debug("sticky", proxy, sourceOf(proxy) ?? "unknown")
+  debug("sticky", proxyTrace(proxy))
   void saveCache()
 }
 
@@ -624,12 +704,19 @@ const validateMany = async (candidates: ReadonlyArray<{ proxy: string; source?: 
     Array.from({ length: VALIDATE_CONCURRENCY }, async () => {
       while (!stop() && index < candidates.length) {
         const candidate = candidates[index++]
+        if (candidate.source && purgedSources.has(candidate.source)) continue
+        // Skip dialing exits in a /24 already burned for free-tier quota — validate
+        // used to re-admit them and the next hunt dialed the same datacenter again.
+        if (subnetBlocked(candidate.proxy)) continue
         if (await validate(candidate.proxy)) {
           add(candidate.proxy, Date.now(), candidate.source)
-          debug("validated", candidate.proxy, candidate.source ?? "unknown")
+          debug("validated", proxyTrace(candidate.proxy, candidate.source))
+        } else {
+          // Validate is pool hygiene only. Counting invalids as yield-bad EXPUNGEd
+          // every survivor (hookzof/hproxy/rdavydov/geonode) after ~8 dead dials
+          // and left `pool 0` with nothing left to discover.
+          debug("invalid", proxyTrace(candidate.proxy, candidate.source))
         }
-        // A failed probe keeps the entry stale instead of deleting it: a slow or
-        // filtered network must not throw away proxies that work later.
       }
     }),
   )
@@ -643,6 +730,30 @@ const shuffle = <A>(values: A[]) => {
     values[target] = value
   }
   return values
+}
+
+// Spread validate work across lists so the first source in SOURCES cannot eat the
+// whole MAX_CANDIDATES budget alone.
+const interleaveBySource = <A extends { source?: string }>(candidates: ReadonlyArray<A>, limit: number) => {
+  const buckets = new Map<string, A[]>()
+  for (const candidate of candidates) {
+    const key = candidate.source ?? ""
+    const list = buckets.get(key)
+    if (list) list.push(candidate)
+    else buckets.set(key, [candidate])
+  }
+  const queues = [...buckets.entries()]
+    .toSorted((left, right) => sourceScore(right[0]) - sourceScore(left[0]))
+    .map((entry) => entry[1])
+  const out: A[] = []
+  while (out.length < limit && queues.some((queue) => queue.length > 0)) {
+    for (const queue of queues) {
+      if (out.length >= limit) break
+      const next = queue.shift()
+      if (next) out.push(next)
+    }
+  }
+  return out
 }
 
 const candidatePath = () => {
@@ -712,20 +823,39 @@ const readCache = async () => {
       const proxy = normalize(data.active)
       if (proxy && !blocked(proxy)) active = proxy
     }
-    if ("yields" in data && data.yields && typeof data.yields === "object") {
+    const yieldVersion = "yieldVersion" in data && typeof data.yieldVersion === "number" ? data.yieldVersion : 0
+    // v3: caches that EXPUNGEd survivors via validate-bad are poison — keep only
+    // the compile-time HARD_PURGED set, then re-learn POST yields from scratch.
+    if (yieldVersion >= YIELD_VERSION && "purged" in data && Array.isArray(data.purged)) {
+      for (const value of data.purged) {
+        if (typeof value === "string" && value.includes("/")) purgedSources.add(value)
+      }
+    }
+    if ("subnets" in data && data.subnets && typeof data.subnets === "object") {
+      for (const [subnet, until] of Object.entries(data.subnets as Record<string, unknown>)) {
+        if (typeof until !== "number" || until <= Date.now()) continue
+        if (!/^\d{1,3}(?:\.\d{1,3}){3}\/24$/.test(subnet)) continue
+        subnetBlocks.set(subnet, until)
+      }
+    }
+    // Pre-v3 caches mixed validate into yields — ignore them.
+    if (yieldVersion >= YIELD_VERSION && "yields" in data && data.yields && typeof data.yields === "object") {
       for (const [source, value] of Object.entries(data.yields as Record<string, unknown>)) {
         // Drop host-only yield rows left by the old labeler — they poison every
         // GitHub list under one toxic key.
         if (!source.includes("/")) continue
+        if (purgedSources.has(source)) continue
         if (!value || typeof value !== "object") continue
         const ok = "ok" in value && typeof value.ok === "number" ? value.ok : 0
         const bad = "bad" in value && typeof value.bad === "number" ? value.bad : 0
         if (ok > 0 || bad > 0) yields.set(source, { ok, bad })
+        // Cached evidence of a dead list → expunge on load, do not thaw it back.
+        if (shouldExpunge(source)) expungeSource(source)
       }
     }
-    // forceSourceToxic used to persist permanent bans across restarts. Thaw when
-    // the live pool is too thin so the next refresh can use public lists again.
-    if (usable().length < POOL_TARGET / 8) thawToxicYields()
+    // Drop exits that belonged to lists we already deleted.
+    entries = entries.filter((entry) => !entry.source || !purgedSources.has(entry.source))
+    if (active && sourceOf(active) && purgedSources.has(sourceOf(active)!)) active = undefined
   } catch {}
 }
 
@@ -735,11 +865,16 @@ const saveCache = async () => {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
     // Burned exits must stay in the cache with blockedUntil. Dropping them made
     // every restart rediscover the same dead addresses from the candidate list.
+    const now = Date.now()
     const data = JSON.stringify({
       version: 1,
+      yieldVersion: YIELD_VERSION,
       active,
-      yields: Object.fromEntries(yields),
+      purged: [...purgedSources],
+      subnets: Object.fromEntries([...subnetBlocks].filter(([, until]) => until > now)),
+      yields: Object.fromEntries([...yields].filter(([source]) => !purgedSources.has(source))),
       entries: entries
+        .filter((entry) => !entry.source || !purgedSources.has(entry.source))
         .toSorted((left, right) => left.checkedAt - right.checkedAt)
         .slice(-POOL_CACHE_LIMIT)
         .map((entry) => ({
@@ -770,9 +905,6 @@ const refresh = async () => {
   const dry = usable().length === 0
   const discoverNow = forceDiscover || dry
   forceDiscover = false
-  // A yield cache poisoned by permanent force-toxic left discover skipping every
-  // public list while usable stayed empty — thaw before asking the network again.
-  if (discoverNow && dry) thawToxicYields()
   const reuse =
     !discoverNow &&
     process.env.OPENCODE_PROXY_ONLY !== "1" &&
@@ -784,20 +916,21 @@ const refresh = async () => {
       ? []
       : await discover()
   if (!reuse && discovered.length > 0) void saveCandidates(discovered)
-  const candidates = [
+  const filtered = [
     ...stale.map((entry) => ({ proxy: entry.proxy, source: entry.source })),
     ...(await seeded()).map((proxy) => ({ proxy, source: "env" as string | undefined })),
     ...discovered,
-  ]
-    .filter((candidate) => {
-      // A previously burned exit is still in the candidate dump for hours; skip it
-      // here so validation does not spend slots re-probing known-dead addresses.
-      if (blocked(candidate.proxy) || known.has(candidate.proxy) || sourceSkipped(candidate.source)) return false
-      known.add(candidate.proxy)
-      return true
-    })
-    .toSorted((left, right) => sourceScore(right.source) - sourceScore(left.source))
-    .slice(0, MAX_CANDIDATES)
+  ].filter((candidate) => {
+    // A previously burned exit is still in the candidate dump for hours; skip it
+    // here so validation does not spend slots re-probing known-dead addresses.
+    if (blocked(candidate.proxy) || known.has(candidate.proxy) || sourceSkipped(candidate.source)) return false
+    known.add(candidate.proxy)
+    return true
+  })
+  // Round-robin across lists. SOURCES order used to dump all of hookzof into the
+  // first 2500 slots, so the idle warm log looked like a single-source flood and
+  // other lists never got a validate turn before the first chat.
+  const candidates = interleaveBySource(filtered, MAX_CANDIDATES)
 
   await validateMany(
     [...fresh.map((entry) => ({ proxy: entry.proxy, source: entry.source })), ...candidates],
@@ -1034,7 +1167,8 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
 
   const external = init?.signal ?? (input instanceof Request ? input.signal : undefined)
   const tryAdvancePool = async () => {
-    if (poolAdvances >= MAX_POOL_ADVANCES) return false
+    // Finite budgets still cap advances; forever-hunt keeps retiring lists.
+    if (Number.isFinite(deadline) && poolAdvances >= MAX_POOL_ADVANCES) return false
     if (quotaTried.length === 0) return false
     poolAdvances++
     const burned = [...new Set(quotaTried)]
@@ -1042,31 +1176,38 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
     retireQuotaPool(burned)
     quotaHits = 0
     emptySince = 0
-    const warmMs = Math.min(20_000, Math.max(0, deadline - Date.now()))
+    const warmMs = Math.min(20_000, Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : 20_000)
     await awaitWarm(warmMs)
     if (pickable(excluded).length === 0) {
-      // Every list still cooling or yield-toxic — lift some bans and discover again
-      // instead of surfacing exhausted while candidates.json still has tens of thousands.
-      thawToxicYields()
+      // Cooldowns only — purged sources stay deleted. Lift temporary bans and
+      // rediscover surviving lists instead of exhausting while candidates remain.
       liftOldestCooldowns(0.5)
       forceDiscover = true
       lastRefresh = 0
       await awaitWarm(warmMs)
     }
-    debug("advanced pool", poolAdvances, "pickable", pickable(excluded).length)
+    debug("advanced pool", poolAdvances, "pickable", pickable(excluded).length, "purged", purgedSources.size)
     return pickable(excluded).length > 0
   }
   // The deadline bounds the hunt. This guard only stops a pathologically uniform
   // stream of real attempts from pinning a request forever.
   let attempts = 0
   while (Date.now() < deadline && attempts < MAX_ATTEMPTS) {
+    // The AI headerTimeout aborts the signal when the rotator has already spent
+    // minutes hunting. Bail before the next probe so the session retry can start
+    // clean instead of racing a timed-out outer Effect.
+    if (external?.aborted) {
+      throw external.reason instanceof Error
+        ? external.reason
+        : new DOMException("The operation was aborted.", "AbortError")
+    }
     // Keep the last exit that answered until it fails. Reusing a live proxy avoids
     // re-hunting a replacement on every single model call, while a rate-limited or
     // dead exit is discarded below and never selected again.
     // Sticky wins every time until THAT exit fails a real POST.
     const sticky =
       active && !excluded.has(active) && !blocked(active) && !sourceSkipped(sourceOf(active)) ? active : undefined
-    if (sticky) debug("sticky try", sticky)
+    if (sticky) debug("sticky try", proxyTrace(sticky))
     // Skip direct only when something is actually pickable — not merely "usable".
     const direct =
       !force &&
@@ -1091,11 +1232,6 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
         // after a few seconds — that is the "desistindo fácil" failure mode.
         const waitMs = proxyTried || quotaHits > 0 ? EMPTY_POOL_WAIT_MS : INITIAL_POOL_WAIT_MS
         emptySince ||= Date.now()
-        if (Date.now() - emptySince >= waitMs && tried.length > 0) {
-          if (await tryAdvancePool()) continue
-          debug("pool empty", quotaHits, tried.length, "pickable", pickable(excluded).length)
-          break
-        }
         if (Date.now() - emptySince >= waitMs && tried.length === 0 && directAttempts === 0) {
           // Force a direct attempt once so the error trace is not blank.
           directBlocked = false
@@ -1103,14 +1239,25 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
           continue
         }
         if (Date.now() - emptySince >= waitMs) {
-          if (await tryAdvancePool()) continue
-          debug("pool empty", quotaHits, tried.length, "pickable", pickable(excluded).length)
-          break
+          if (await tryAdvancePool()) {
+            emptySince = 0
+            continue
+          }
+          // Default budget is infinite — keep rediscovering instead of exhausting.
+          if (Number.isFinite(deadline) && Date.now() >= deadline) {
+            debug("pool empty", quotaHits, tried.length, "pickable", pickable(excluded).length)
+            break
+          }
+          emptySince = Date.now()
+          forceDiscover = true
+          lastRefresh = 0
+          await awaitWarm(Math.min(5_000, Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : 5_000))
+          continue
         }
-        await awaitWarm(Math.min(3_000, Math.max(0, deadline - Date.now())))
-        const remaining = deadline - Date.now()
-        if (remaining <= 0) break
-        await Bun.sleep(Math.min(250, remaining))
+        const warmMs = Math.min(3_000, Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : 3_000)
+        await awaitWarm(warmMs)
+        if (Number.isFinite(deadline) && Date.now() >= deadline) break
+        await Bun.sleep(Math.min(250, Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : 250))
         continue
       }
       emptySince = 0
@@ -1139,11 +1286,21 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
       selected =
         alive ??
         probed.find((result) => result.status === undefined && !excluded.has(result.proxy))?.proxy
-      debug("probe", batch.length, alive ? "alive" : selected ? "post-anyway" : "none", "quota", quotaHits)
+      debug(
+        "probe",
+        batch.length,
+        alive ? "alive" : selected ? "post-anyway" : "none",
+        "quota",
+        quotaHits,
+        selected ? proxyTrace(selected) : "",
+      )
       if (quotaDry(quotaHits, excluded) && attempts > 0) {
         if (await tryAdvancePool()) continue
-        debug("quota dry", quotaHits, "pickable", pickable(excluded).length)
-        break
+        if (Number.isFinite(deadline) && Date.now() >= deadline) {
+          debug("quota dry", quotaHits, "pickable", pickable(excluded).length)
+          break
+        }
+        continue
       }
       if (!selected) {
         // Entire batch had hard probe failures (403/429/…). Soft-exclude timeouts
@@ -1171,10 +1328,10 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
     attempts++
     try {
       const remaining = Math.max(1_000, deadline - Date.now())
-      debug("attempt", selected ?? "direct", new URL(target).host)
+      debug("attempt", proxyTrace(selected), new URL(target).host)
       const response = await send(input, init, proxy, Math.min(ATTEMPT_TIMEOUT_MS, remaining))
       tried.push(`${selected ?? "direct"}=${response.status}`)
-      debug("response", selected ?? "direct", response.status)
+      debug("response", proxyTrace(selected), response.status)
       if (!shouldRotate(response.status)) {
         // Do not return until the first body byte arrives. Public proxies often
         // answer headers and then ECONNRESET; that must stay inside the hunt.
@@ -1182,7 +1339,7 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
         if ("drop" in opened) {
           tried.push(`${selected ?? "direct"}=${networkDropLabel(opened.drop)}`)
           failure = opened.drop
-          debug("first byte", selected ?? "direct", opened.drop instanceof Error ? opened.drop.message : opened.drop)
+          debug("first byte", proxyTrace(selected), opened.drop instanceof Error ? opened.drop.message : opened.drop)
           if (!selected) {
             directAttempts++
             directBlocked = true
@@ -1221,15 +1378,18 @@ export const fetch = async (input: FetchInput, init?: FetchInit): Promise<FetchR
       excluded.add(selected)
       if (quotaDry(quotaHits, excluded)) {
         if (await tryAdvancePool()) continue
-        debug("quota dry", quotaHits, "pickable", pickable(excluded).length)
-        break
+        if (Number.isFinite(deadline) && Date.now() >= deadline) {
+          debug("quota dry", quotaHits, "pickable", pickable(excluded).length)
+          break
+        }
+        continue
       }
-      if (Date.now() > deadline) break
+      if (Number.isFinite(deadline) && Date.now() > deadline) break
     } catch (cause) {
       const label = networkDropLabel(cause)
       tried.push(`${selected ?? "direct"}=${label}`)
       failure = cause
-      debug("error", selected ?? "direct", cause instanceof Error ? cause.message : cause)
+      debug("error", proxyTrace(selected), cause instanceof Error ? cause.message : cause)
       // A hang waiting for headers is the worst case: the AI layer reports
       // ProviderHeaderTimeoutError, the chat freezes on that message, and a silent
       // session retry reuses the same sticky exit. Burn the exit before rethrowing
@@ -1325,7 +1485,7 @@ const openStream = async (
       if (!proxy) return
       if (ok) markSuccess(proxy)
       else {
-        debug("stream incomplete", proxy, sse ? "sse" : "body")
+        debug("stream incomplete", proxyTrace(proxy), sse ? "sse" : "body")
         markDead(proxy)
       }
     }
@@ -1345,7 +1505,7 @@ const openStream = async (
           note(next.value)
           controller.enqueue(next.value)
         } catch (cause) {
-          debug("stream drop", proxy ?? "direct", cause instanceof Error ? cause.message : cause)
+          debug("stream drop", proxyTrace(proxy), cause instanceof Error ? cause.message : cause)
           if (proxy) markDead(proxy)
           controller.error(cause)
         }
@@ -1373,6 +1533,8 @@ export const status = () => ({
   active,
   proxies: usable().map((entry) => entry.proxy),
   yields: Object.fromEntries(yields),
+  purged: [...purgedSources],
+  subnets: Object.fromEntries([...subnetBlocks].filter(([, until]) => until > Date.now())),
 })
 
 // Drop the sticky exit after a transport-level header timeout so a session retry
@@ -1392,6 +1554,9 @@ export const reset = () => {
   loading = undefined
   forceDiscover = false
   failures.clear()
+  subnetBlocks.clear()
   yields.clear()
   sourceCooldown.clear()
+  purgedSources.clear()
+  for (const source of HARD_PURGED_SOURCES) purgedSources.add(source)
 }

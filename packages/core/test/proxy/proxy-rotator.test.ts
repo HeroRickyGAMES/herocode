@@ -38,6 +38,11 @@ describe("proxy rotator", () => {
         "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text",
       ),
     ).toBe("api.proxyscrape.com/v4/free-proxy-list/get?socks5")
+    expect(
+      ProxyRotator.sourceLabel(
+        "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=socks5",
+      ),
+    ).toBe("proxylist.geonode.com/api/proxy-list?socks5&page=2")
   })
 
   test("groups IPv4 proxies by /24 for shared free-tier quota", () => {
@@ -45,5 +50,31 @@ describe("proxy rotator", () => {
     expect(ProxyRotator.subnetOf("http://45.74.31.40:8080")).toBe("45.74.31.0/24")
     expect(ProxyRotator.subnetOf("http://102.244.78.61:8082")).toBe("102.244.78.0/24")
     expect(ProxyRotator.subnetOf("socks5://example.com:1080")).toBeUndefined()
+  })
+
+  test("status exposes active subnet bans after reset clears them", () => {
+    ProxyRotator.reset()
+    expect(ProxyRotator.status().subnets).toEqual({})
+  })
+
+  test("formats source:proxy traces for dead-list debugging", () => {
+    expect(ProxyRotator.proxyTrace("http://1.2.3.4:8080", "raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt")).toBe(
+      "raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt : proxy: 1.2.3.4:8080",
+    )
+    expect(ProxyRotator.proxyTrace(undefined)).toBe("direct")
+  })
+
+  test("ships known-dead lists already purged", () => {
+    ProxyRotator.reset()
+    expect(ProxyRotator.status().purged).toContain("raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt")
+    expect(ProxyRotator.status().purged).toContain("raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt")
+    expect(ProxyRotator.status().purged).toContain("raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt")
+    expect(ProxyRotator.status().purged).toContain(
+      "raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
+    )
+    expect(ProxyRotator.status().purged).toContain("raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt")
+    expect(ProxyRotator.status().purged).toContain("raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt")
+    expect(ProxyRotator.status().purged).toContain("raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt")
+    expect(ProxyRotator.status().purged).toContain("api.proxyscrape.com/v4/free-proxy-list/get?socks5")
   })
 })

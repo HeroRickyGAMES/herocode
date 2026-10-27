@@ -9,6 +9,132 @@ import { LayerNodePlatform } from "../../src/effect/app-node-platform.js"
 import { ProxyRotator } from "../../src/proxy/proxy-rotator.js"
 import * as SocksBridge from "../../src/proxy/socks-bridge.js"
 
+test("bans a /24 after shared free-tier quotas so cousins stay unpickable", async () => {
+  ProxyRotator.reset()
+  let goodPosts = 0
+  const origin = Bun.serve({
+    port: 0,
+    fetch(request) {
+      if (request.headers.get("x-exit") === "good" && request.method === "POST") {
+        goodPosts++
+        return new Response(request.body)
+      }
+      if (request.method === "GET" || request.method === "HEAD") return new Response("no", { status: 404 })
+      return new Response("slow down", { status: 429, headers: { "retry-after": "0" } })
+    },
+  })
+  const validator = Bun.serve({
+    port: 0,
+    fetch: () => new Response("1.2.3.4"),
+  })
+  // Two exits in 127.0.0.0/24 share quota; 127.0.1.1 is a different /24 on loopback.
+  const limitedA = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const headers = new Headers(request.headers)
+      headers.delete("host")
+      headers.set("x-exit", "a")
+      const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer()
+      return fetch(request.url, { method: request.method, headers, body, redirect: "manual" })
+    },
+  })
+  const limitedB = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const headers = new Headers(request.headers)
+      headers.delete("host")
+      headers.set("x-exit", "b")
+      const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer()
+      return fetch(request.url, { method: request.method, headers, body, redirect: "manual" })
+    },
+  })
+  const limitedCousin = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const headers = new Headers(request.headers)
+      headers.delete("host")
+      headers.set("x-exit", "cousin")
+      const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer()
+      return fetch(request.url, { method: request.method, headers, body, redirect: "manual" })
+    },
+  })
+  const good = Bun.serve({
+    hostname: "127.0.1.1",
+    port: 0,
+    async fetch(request) {
+      const headers = new Headers(request.headers)
+      headers.delete("host")
+      headers.set("x-exit", "good")
+      const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer()
+      return fetch(request.url, { method: request.method, headers, body, redirect: "manual" })
+    },
+  })
+  const proxyA = `http://127.0.0.1:${limitedA.port}`
+  const proxyB = `http://127.0.0.1:${limitedB.port}`
+  const proxyCousin = `http://127.0.0.1:${limitedCousin.port}`
+  const proxyGood = `http://127.0.1.1:${good.port}`
+
+  const environment = {
+    XDG_CACHE_HOME: await mkdtemp(join(tmpdir(), "opencode-proxy-subnet-")),
+    // Only the shared /24 first so the hunt must burn it before a good exit appears.
+    OPENCODE_PROXY: `${proxyA}\n${proxyB}`,
+    OPENCODE_PROXY_ONLY: "1",
+    OPENCODE_PROXY_VALIDATE_URL: `http://127.0.0.1:${validator.port}`,
+    OPENCODE_PROXY_FORCE: undefined,
+    OPENCODE_PROXY_LOCAL: "1",
+    OPENCODE_PROXY_BUDGET_MS: "8000",
+  }
+  const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]))
+  Object.assign(process.env, environment)
+
+  try {
+    ProxyRotator.warm()
+    const ready = Date.now() + 5_000
+    while (Date.now() < ready && ProxyRotator.status().proxies.length < 2) await Bun.sleep(50)
+    expect(ProxyRotator.status().proxies.length).toBeGreaterThanOrEqual(2)
+
+    await expect(
+      ProxyRotator.fetch(`http://127.0.0.1:${origin.port}/completion`, { method: "POST", body: "{}" }),
+    ).rejects.toThrow(/rotation exhausted/i)
+    expect(ProxyRotator.status().subnets["127.0.0.0/24"]).toBeGreaterThan(Date.now())
+
+    // Let any in-flight warm from the hunt finish before seeding replacements.
+    await Bun.sleep(500)
+    process.env.OPENCODE_PROXY = `${proxyGood}\n${proxyCousin}`
+    ProxyRotator.warm(true)
+    const filled = Date.now() + 8_000
+    while (Date.now() < filled && !ProxyRotator.status().proxies.includes(proxyGood)) {
+      ProxyRotator.warm(true)
+      await Bun.sleep(100)
+    }
+    expect(ProxyRotator.status().proxies).toContain(proxyGood)
+    expect(ProxyRotator.status().proxies).not.toContain(proxyCousin)
+
+    const response = await ProxyRotator.fetch(`http://127.0.0.1:${origin.port}/completion`, {
+      method: "POST",
+      body: "{}",
+    })
+    expect(await response.text()).toBe("{}")
+    expect(goodPosts).toBe(1)
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    origin.stop(true)
+    validator.stop(true)
+    limitedA.stop(true)
+    limitedB.stop(true)
+    limitedCousin.stop(true)
+    good.stop(true)
+    SocksBridge.stop()
+    ProxyRotator.reset()
+  }
+})
+
 test("rotates a rate-limited request through the configured proxy", async () => {
   ProxyRotator.reset()
   let direct = 0
