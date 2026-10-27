@@ -426,15 +426,6 @@ const noteYield = (proxy: string, kind: "ok" | "bad") => {
   if (kind === "bad") maybeExpunge(source)
 }
 
-const noteSourceYield = (source: string | undefined, kind: "ok" | "bad") => {
-  if (!source || !source.includes("/") || purgedSources.has(source)) return
-  const state = yields.get(source) ?? { ok: 0, bad: 0 }
-  if (kind === "ok") state.ok++
-  else state.bad++
-  yields.set(source, state)
-  if (kind === "bad") maybeExpunge(source)
-}
-
 const sourceScore = (source: string | undefined) => {
   if (!source || purgedSources.has(source)) return -1
   const state = yields.get(source)
