@@ -6,6 +6,7 @@ import { Integration } from "../integration.js"
 import { AgentNotFoundError, StepFailedError } from "./error.js"
 import { ModelResolver } from "../model-resolver.js"
 import { SessionRunnerModel } from "./runner/model.js"
+import { ProxyRotator } from "../proxy/proxy-rotator.js"
 
 const tokenSharingMessages = {
   subscription_sharing_user_not_eligible:
@@ -44,10 +45,17 @@ export function toSessionError(cause: unknown): SessionError.Error {
       case "ContentPolicy":
         return providerError("provider.content-filter", cause.reason)
       case "Transport":
+        // Mid-stream proxy drops (ECONNRESET) happen after sticky is pinned. Drop
+        // the sticky so the automatic session retry does not dial the same dead exit.
+        if (/ECONNRESET|ECONNREFUSED|EPIPE|socket connection was closed|other side closed|terminated|fetch failed/i.test(cause.message))
+          ProxyRotator.invalidateActive()
         return providerError("provider.transport", cause.reason)
       case "ProviderInternal":
         return providerError("provider.internal", cause.reason)
       case "InvalidProviderOutput":
+        // Mid-stream proxy death often arrives as incomplete SSE (no finish_reason),
+        // not as Transport/ECONNRESET — first byte already passed the hunt gate.
+        if (cause.reason.classification === "incomplete-stream") ProxyRotator.invalidateActive()
         return providerError("provider.invalid-output", cause.reason)
       case "InvalidRequest":
         return providerError("provider.invalid-request", cause.reason)

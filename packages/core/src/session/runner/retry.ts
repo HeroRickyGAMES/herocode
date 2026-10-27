@@ -50,7 +50,15 @@ export const policy = (sessionID: SessionSchema.ID) =>
           Number.isFinite(event.decision.delay) && event.decision.delay >= 0
             ? Math.ceil(event.decision.delay)
             : next.delay
-        return { retry: true as const, attempt: next.attempt, delay: normalized }
+        // Mid-stream proxy FIN already burned the sticky exit. Exponential backoff
+        // only leaves "Retry due · without finish_reason" on screen while nothing
+        // recovers — continue/retry immediately on a fresh exit.
+        const delay =
+          input.cause.reason._tag === "InvalidProviderOutput" &&
+          input.cause.reason.classification === "incomplete-stream"
+            ? 0
+            : normalized
+        return { retry: true as const, attempt: next.attempt, delay }
       })
   })
 

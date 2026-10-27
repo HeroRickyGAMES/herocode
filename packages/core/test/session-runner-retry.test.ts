@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { AIError, ProviderInternalError, TransportError } from "@opencode/ai"
+import { AIError, InvalidProviderOutputError, ProviderInternalError, TransportError } from "@opencode/ai"
 import { Agent } from "@opencode/schema/agent"
 import { Model } from "@opencode/schema/model"
 import { Provider } from "@opencode/core/provider"
@@ -42,6 +42,20 @@ describe("SessionRunnerRetry.policy", () => {
   it.effect("keeps the general allowance for other transient failures", () =>
     Effect.gen(function* () {
       expect(yield* decisions(internal, 11)).toEqual([...Array(10).fill(true), false])
+    }),
+  )
+
+  it.effect("retries incomplete streams immediately without backoff delay", () =>
+    Effect.gen(function* () {
+      const cause = new AIError({
+        reason: new InvalidProviderOutputError({
+          message: "OpenAI Chat stream ended without finish_reason",
+          classification: "incomplete-stream",
+        }),
+      })
+      const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_incomplete"))
+      const first = yield* policy(input(cause))
+      expect(first).toEqual({ retry: true, attempt: 2, delay: 0 })
     }),
   )
 })

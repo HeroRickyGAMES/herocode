@@ -256,12 +256,18 @@ describe("toSessionError", () => {
     })
   })
 
-  test("retries rate limits, provider-internal, transport, and unrecognized failures", () => {
+  test("retries rate limits, provider-internal, transport, incomplete streams, and unrecognized failures", () => {
     const eligible = [
       llm(new RateLimitError({ message: "rate" })),
       llm(new ProviderInternalError({ message: "internal" })),
       llm(new TransportError({ message: "transport", transport: "http", operation: "request" })),
       llm(new UnknownProviderError({ message: "unknown" })),
+      llm(
+        new InvalidProviderOutputError({
+          message: "OpenAI Chat stream ended without finish_reason",
+          classification: "incomplete-stream",
+        }),
+      ),
     ]
     const ineligible = [
       llm(new AuthenticationError({ message: "auth" })),
@@ -280,8 +286,24 @@ describe("toSessionError", () => {
       ),
     ]
 
-    expect(eligible.map(SessionRunnerRetry.isRetryable)).toEqual([true, true, true, true])
+    expect(eligible.map(SessionRunnerRetry.isRetryable)).toEqual([true, true, true, true, true])
     expect(ineligible.map(SessionRunnerRetry.isRetryable)).toEqual([false, false, false, false, false, false, false])
+  })
+
+  test("maps incomplete-stream to invalid-output without throwing when no sticky proxy", () => {
+    expect(
+      toSessionError(
+        llm(
+          new InvalidProviderOutputError({
+            message: "OpenAI Chat stream ended without finish_reason",
+            classification: "incomplete-stream",
+          }),
+        ),
+      ),
+    ).toEqual({
+      type: "provider.invalid-output",
+      message: "OpenAI Chat stream ended without finish_reason",
+    })
   })
 
   test("retries accepted transport reads but not accepted writes or rejected requests", () => {

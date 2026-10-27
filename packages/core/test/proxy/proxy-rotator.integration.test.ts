@@ -68,7 +68,8 @@ test("rotates a rate-limited request through the configured proxy", async () => 
       }).pipe(Effect.provide(AppNodeBuilder.build(LayerNodePlatform.proxyHttpClient))),
     )
     expect(body).toBe('{"hello":"world"}')
-    expect(direct).toBe(1)
+    // A warm pool skips the direct attempt so a burned home IP is not tried first.
+    expect(direct).toBe(0)
     expect(proxied).toBe(1)
 
     // A limited proxy is discarded and the exhausted rotation must surface as a
@@ -88,6 +89,98 @@ test("rotates a rate-limited request through the configured proxy", async () => 
     SocksBridge.stop()
   }
 })
+
+test(
+  "pins sticky only after a terminal SSE finish_reason, not a clean mid-stream FIN",
+  async () => {
+    ProxyRotator.reset()
+    const origin = Bun.serve({
+      port: 0,
+      fetch(request) {
+        if (request.method === "GET" || request.method === "HEAD") return new Response("no", { status: 404 })
+        return new Response("slow down", { status: 429 })
+      },
+    })
+    const validator = Bun.serve({
+      port: 0,
+      fetch: () => new Response("ok"),
+    })
+    let wave = 0
+    const proxy = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        if (request.method === "CONNECT") return new Response("unsupported", { status: 405 })
+        if (request.method === "GET" || request.method === "HEAD") {
+          const headers = new Headers(request.headers)
+          headers.delete("host")
+          return fetch(request.url, { method: request.method, headers, redirect: "manual" })
+        }
+        wave++
+        const incomplete =
+          'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n'
+        const complete =
+          'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\n' +
+          'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+          "data: [DONE]\n\n"
+        return new Response(wave === 1 ? incomplete : complete, {
+          headers: { "content-type": "text/event-stream" },
+        })
+      },
+    })
+    const proxyURL = `http://127.0.0.1:${proxy.port}`
+
+    const environment = {
+      XDG_CACHE_HOME: await mkdtemp(join(tmpdir(), "opencode-proxy-sse-")),
+      OPENCODE_PROXY: proxyURL,
+      OPENCODE_PROXY_ONLY: "1",
+      OPENCODE_PROXY_VALIDATE_URL: `http://127.0.0.1:${validator.port}`,
+      OPENCODE_PROXY_FORCE: undefined,
+      OPENCODE_PROXY_LOCAL: "1",
+      OPENCODE_PROXY_BUDGET_MS: "15000",
+    }
+    const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]))
+    Object.assign(process.env, environment)
+
+    try {
+      ProxyRotator.warm()
+      const ready = Date.now() + 10_000
+      while (Date.now() < ready && ProxyRotator.status().proxies.length < 1) await Bun.sleep(50)
+      expect(ProxyRotator.status().proxies.length).toBeGreaterThan(0)
+
+      const cut = await ProxyRotator.fetch(`http://127.0.0.1:${origin.port}/completion`, {
+        method: "POST",
+        body: "{}",
+      })
+      expect(await cut.text()).toContain("partial")
+      expect(ProxyRotator.status().active).toBeUndefined()
+
+      // markDead blocked the exit; clear so the same env proxy can prove a full SSE.
+      ProxyRotator.reset()
+      Object.assign(process.env, environment)
+      ProxyRotator.warm()
+      const again = Date.now() + 10_000
+      while (Date.now() < again && ProxyRotator.status().proxies.length < 1) await Bun.sleep(50)
+
+      const ok = await ProxyRotator.fetch(`http://127.0.0.1:${origin.port}/completion`, {
+        method: "POST",
+        body: "{}",
+      })
+      expect(await ok.text()).toContain("[DONE]")
+      expect(ProxyRotator.status().active).toBe(proxyURL)
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      ProxyRotator.reset()
+      origin.stop(true)
+      validator.stop(true)
+      proxy.stop(true)
+      SocksBridge.stop()
+    }
+  },
+  60_000,
+)
 
 test(
   "times out a proxy that hangs on response headers instead of freezing the chat",

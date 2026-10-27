@@ -28,4 +28,22 @@ describe("proxy rotator", () => {
     expect(ProxyRotator.shouldRotate(500)).toBe(false)
     expect(ProxyRotator.shouldRotate(401)).toBe(false)
   })
+
+  test("labels proxy list sources by host path so GitHub mirrors stay distinct", () => {
+    expect(ProxyRotator.sourceLabel("https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt")).toBe(
+      "raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+    )
+    expect(
+      ProxyRotator.sourceLabel(
+        "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text",
+      ),
+    ).toBe("api.proxyscrape.com/v4/free-proxy-list/get?socks5")
+  })
+
+  test("groups IPv4 proxies by /24 for shared free-tier quota", () => {
+    expect(ProxyRotator.subnetOf("socks5://45.74.31.47:4504")).toBe("45.74.31.0/24")
+    expect(ProxyRotator.subnetOf("http://45.74.31.40:8080")).toBe("45.74.31.0/24")
+    expect(ProxyRotator.subnetOf("http://102.244.78.61:8082")).toBe("102.244.78.0/24")
+    expect(ProxyRotator.subnetOf("socks5://example.com:1080")).toBeUndefined()
+  })
 })
